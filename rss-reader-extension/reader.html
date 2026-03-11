@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>RSSリーダー</title>
+  <link rel="icon" id="favicon" href="icons/icon48.png">
+  <link rel="stylesheet" href="reader.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Left Sidebar -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <h1>RSSリーダー</h1>
+        <div id="sidebar-actions">
+          <button id="btn-add-folder" title="フォルダを追加">📁</button>
+          <button id="btn-refresh" title="更新">⟳</button>
+          <button id="btn-settings" title="設定">⚙</button>
+        </div>
+      </div>
+      <div id="add-feed-area">
+        <button id="btn-add-feed">フィードを追加</button>
+      </div>
+      <ul id="feed-list"></ul>
+    </aside>
+
+    <!-- Main Content -->
+    <main id="content">
+      <div id="content-header">
+        <div id="feed-title">フィードを選択してください</div>
+        <div id="content-actions">
+          <div id="search-box">
+            <input type="text" id="search-input" placeholder="検索...">
+            <span class="search-icon">🔍</span>
+          </div>
+          <button id="btn-view-list" class="view-btn active" title="リスト表示">☰</button>
+          <button id="btn-view-card" class="view-btn" title="カード表示">⊞</button>
+        </div>
+      </div>
+      <div id="article-list"></div>
+    </main>
+  </div>
+
+  <!-- Add Feed Modal -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal">
+      <h2>フィードを追加</h2>
+      <div class="modal-field">
+        <label for="feed-url-input">フィードURL</label>
+        <input type="url" id="feed-url-input" placeholder="https://example.com/rss">
+      </div>
+      <div class="modal-field">
+        <label for="feed-name-input">表示名（任意）</label>
+        <input type="text" id="feed-name-input" placeholder="フィード名">
+      </div>
+      <div class="modal-field">
+        <label for="feed-folder-select">フォルダ（任意）</label>
+        <select id="feed-folder-select">
+          <option value="">なし（ルート）</option>
+        </select>
+      </div>
+      <div id="modal-error" class="hidden"></div>
+      <div class="modal-buttons">
+        <button id="btn-modal-cancel">キャンセル</button>
+        <button id="btn-modal-add">追加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Folder Modal -->
+  <div id="folder-modal-overlay" class="hidden">
+    <div id="folder-modal">
+      <h2>フォルダを追加</h2>
+      <div class="modal-field">
+        <label for="folder-name-input">フォルダ名</label>
+        <input type="text" id="folder-name-input" placeholder="フォルダ名">
+      </div>
+      <div id="folder-modal-error" class="hidden"></div>
+      <div class="modal-buttons">
+        <button id="btn-folder-modal-cancel">キャンセル</button>
+        <button id="btn-folder-modal-add">追加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Article Detail Panel -->
+  <div id="detail-overlay" class="hidden">
+    <div id="detail-panel">
+      <div id="detail-header">
+        <button id="btn-close-detail">✕</button>
+      </div>
+      <div id="detail-content"></div>
+    </div>
+  </div>
+
+  <!-- Hidden file input for OPML import -->
+  <input type="file" id="opml-file-input" accept=".opml,.xml" style="display:none">
+
+  <script src="reader.js"></script>
+</body>
+</html>
