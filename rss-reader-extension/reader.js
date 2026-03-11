@@ -179,6 +179,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Set icon on load and watch for OS color scheme changes
   updateActionIcon();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateActionIcon);
+  // Refresh all feeds on open
+  refreshAll();
 });
 
 // ===== Storage =====
