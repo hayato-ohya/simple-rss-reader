@@ -4,9 +4,9 @@ chrome.action.onClicked.addListener(() => {
 
 // Set up alarm based on stored interval
 async function setupAlarm() {
-  const { autoRefreshMinutes = 5 } = await chrome.storage.local.get("autoRefreshMinutes");
+  const { autoRefreshMinutes = 5, backgroundRefresh = true } = await chrome.storage.local.get(["autoRefreshMinutes", "backgroundRefresh"]);
   await chrome.alarms.clear("updateFeeds");
-  if (autoRefreshMinutes > 0) {
+  if (backgroundRefresh && autoRefreshMinutes > 0) {
     chrome.alarms.create("updateFeeds", { periodInMinutes: autoRefreshMinutes });
   }
 }
@@ -15,7 +15,7 @@ setupAlarm();
 
 // Re-setup alarm when settings change
 chrome.storage.onChanged.addListener((changes) => {
-  if (changes.autoRefreshMinutes) {
+  if (changes.autoRefreshMinutes || changes.backgroundRefresh) {
     setupAlarm();
   }
 });
@@ -37,8 +37,9 @@ async function updateAllFeeds() {
       const items = parseItems(xml);
       feed.items = items;
       feed.lastUpdated = Date.now();
+      delete feed.error;
     } catch (e) {
-      // skip failed feeds
+      feed.error = e.toString();
     }
   }
   await chrome.storage.local.set({ feeds });

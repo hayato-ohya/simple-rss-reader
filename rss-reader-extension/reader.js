@@ -59,6 +59,7 @@ const translations = {
     font: "フォント",
     fontDefault: "デフォルト",
     autoRefresh: "自動更新間隔",
+    backgroundRefresh: "バックグラウンド更新",
     off: "オフ",
     minutes: "${n}分",
     language: "言語 / Language",
@@ -123,6 +124,7 @@ const translations = {
     font: "Font",
     fontDefault: "Default",
     autoRefresh: "Auto-refresh Interval",
+    backgroundRefresh: "Background Refresh",
     off: "Off",
     minutes: "${n}min",
     language: "Language / 言語",
@@ -153,6 +155,7 @@ let tempShowRead = false;
 let fontFamily = "";
 let autoRefreshMinutes = 5;
 let autoRefreshTimer = null;
+let backgroundRefresh = true;
 
 // ===== DOM Elements =====
 const feedListEl = document.getElementById("feed-list");
@@ -181,11 +184,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateActionIcon);
   // Refresh all feeds on open
   refreshAll();
+  // When background service worker updates feeds in storage, reload and re-render
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.feeds) {
+      feeds = changes.feeds.newValue || [];
+      renderFeedList();
+      renderArticles();
+    }
+  });
 });
 
 // ===== Storage =====
 async function loadState() {
-  const data = await chrome.storage.local.get(["feeds", "folders", "readArticles", "bookmarkedArticles", "darkMode", "markReadOnScroll", "hideReadArticles", "fontFamily", "autoRefreshMinutes", "language"]);
+  const data = await chrome.storage.local.get(["feeds", "folders", "readArticles", "bookmarkedArticles", "darkMode", "markReadOnScroll", "hideReadArticles", "fontFamily", "autoRefreshMinutes", "language", "backgroundRefresh"]);
   feeds = data.feeds || [];
   folders = data.folders || [];
   readArticles = new Set(data.readArticles || []);
@@ -196,6 +207,7 @@ async function loadState() {
   fontFamily = data.fontFamily || "";
   autoRefreshMinutes = data.autoRefreshMinutes ?? 5;
   language = data.language || "ja";
+  backgroundRefresh = data.backgroundRefresh ?? true;
   applyDarkMode();
   applyFont();
   applyLanguage();
@@ -876,11 +888,11 @@ async function refreshAll() {
       feeds[i].error = e.message || String(e);
       console.warn(`Failed to refresh: ${feeds[i].url}`, e);
     }
+    // Update UI and save after each feed so articles appear incrementally
+    await saveFeeds();
+    renderFeedList();
+    renderArticles();
   }
-
-  await saveFeeds();
-  renderFeedList();
-  renderArticles();
 
   btn.textContent = "⟳";
   btn.disabled = false;
@@ -1231,6 +1243,17 @@ function showSettingsMenu() {
   const sep4 = document.createElement("div");
   sep4.className = "context-menu-sep";
   menu.appendChild(sep4);
+
+  const bgRefreshBtn = document.createElement("div");
+  bgRefreshBtn.className = "settings-menu-item";
+  bgRefreshBtn.textContent = (backgroundRefresh ? "✔ " : "　") + t("backgroundRefresh");
+  bgRefreshBtn.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    menu.remove();
+    backgroundRefresh = !backgroundRefresh;
+    await chrome.storage.local.set({ backgroundRefresh });
+  });
+  menu.appendChild(bgRefreshBtn);
 
   const refreshHeader = document.createElement("div");
   refreshHeader.className = "context-menu-header";
