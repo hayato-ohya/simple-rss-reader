@@ -1329,6 +1329,12 @@ function applyDarkMode() {
 
 function updateActionIcon() {
   const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  // Persist so background.js can restore icon after browser restart
+  chrome.storage.local.set({ prefersDarkIcon: isDark });
+  applyActionIcon(isDark);
+}
+
+function applyActionIcon(isDark) {
   const folder = isDark ? "icons/dark" : "icons";
   chrome.action.setIcon({
     path: {

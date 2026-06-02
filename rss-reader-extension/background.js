@@ -2,6 +2,35 @@ chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL("reader.html") });
 });
 
+function setIconFromPreference(isDark) {
+  const folder = isDark ? "icons/dark" : "icons";
+  chrome.action.setIcon({
+    path: {
+      16: `${folder}/icon16.png`,
+      48: `${folder}/icon48.png`,
+      128: `${folder}/icon128.png`,
+    },
+  });
+}
+
+async function restoreIcon() {
+  const { prefersDarkIcon = false } = await chrome.storage.local.get("prefersDarkIcon");
+  setIconFromPreference(prefersDarkIcon);
+}
+
+// Restore icon after browser restart (fires after Chrome finishes initializing the UI)
+chrome.runtime.onStartup.addListener(restoreIcon);
+
+// Restore icon when extension is installed/updated
+chrome.runtime.onInstalled.addListener(restoreIcon);
+
+// Update icon immediately when reader.js saves the preference
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.prefersDarkIcon !== undefined) {
+    setIconFromPreference(changes.prefersDarkIcon.newValue);
+  }
+});
+
 // Set up alarm based on stored interval
 async function setupAlarm() {
   const { autoRefreshMinutes = 5, backgroundRefresh = true } = await chrome.storage.local.get(["autoRefreshMinutes", "backgroundRefresh"]);
