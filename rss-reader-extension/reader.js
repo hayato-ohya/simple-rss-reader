@@ -867,6 +867,16 @@ async function addFeed() {
   }
 }
 
+// Merge new items with existing unread items not present in the new fetch
+function mergeItems(existingItems, newItems) {
+  const newLinks = new Set(newItems.map(item => item.link).filter(Boolean));
+  // Keep old items that are unread and not returned in the new fetch
+  const keptUnread = (existingItems || []).filter(
+    item => item.link && !newLinks.has(item.link) && !readArticles.has(item.link)
+  );
+  return [...newItems, ...keptUnread];
+}
+
 async function refreshAll() {
   const btn = document.getElementById("btn-refresh");
   btn.textContent = "⏳";
@@ -875,7 +885,7 @@ async function refreshAll() {
   for (let i = 0; i < feeds.length; i++) {
     try {
       const result = await fetchFeed(feeds[i].url);
-      feeds[i].items = result.items;
+      feeds[i].items = mergeItems(feeds[i].items, result.items);
       feeds[i].lastUpdated = Date.now();
       feeds[i].error = null;
       if (!feeds[i].title || feeds[i].title === feeds[i].url) {

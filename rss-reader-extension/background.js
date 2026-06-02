@@ -56,15 +56,23 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function updateAllFeeds() {
-  const { feeds = [] } = await chrome.storage.local.get("feeds");
+  const { feeds = [], readArticles = [] } = await chrome.storage.local.get(["feeds", "readArticles"]);
+  const readSet = new Set(readArticles);
+
   for (const feed of feeds) {
     try {
       const resp = await fetch(feed.url);
       const text = await resp.text();
       const parser = new DOMParser();
       const xml = parser.parseFromString(text, "text/xml");
-      const items = parseItems(xml);
-      feed.items = items;
+      const newItems = parseItems(xml);
+
+      // Keep existing unread articles not present in the new fetch
+      const newLinks = new Set(newItems.map(i => i.link).filter(Boolean));
+      const keptUnread = (feed.items || []).filter(
+        item => item.link && !newLinks.has(item.link) && !readSet.has(item.link)
+      );
+      feed.items = [...newItems, ...keptUnread];
       feed.lastUpdated = Date.now();
       delete feed.error;
     } catch (e) {
