@@ -151,6 +151,14 @@ let autoRefreshMinutes = 5;
 let autoRefreshTimer = null;
 let backgroundRefresh = true;
 let refreshing = false;
+let imageCache = {}; // link -> image URL ("" = none found)
+let imageCacheDirty = false;
+let imageCacheSaveTimer = null;
+const imageFetchQueue = [];
+const imageFetchQueued = new Set();
+let imageFetchActive = 0;
+const IMAGE_FETCH_CONCURRENCY = 4;
+const IMAGE_CACHE_MAX = 1500;
 let lastSavedFeedsJson = null; // to ignore storage.onChanged for our own writes
 
 // ===== DOM Elements =====
@@ -192,7 +200,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // ===== Storage =====
 async function loadState() {
-  const data = await chrome.storage.local.get(["feeds", "folders", "readArticles", "bookmarkedArticles", "darkMode", "markReadOnScroll", "hideReadArticles", "fontFamily", "autoRefreshMinutes", "language", "backgroundRefresh"]);
+  const data = await chrome.storage.local.get(["feeds", "folders", "readArticles", "bookmarkedArticles", "darkMode", "markReadOnScroll", "hideReadArticles", "fontFamily", "autoRefreshMinutes", "language", "backgroundRefresh", "isCardView", "imageCache"]);
   feeds = data.feeds || [];
   folders = data.folders || [];
   readArticles = new Set(data.readArticles || []);
@@ -204,6 +212,9 @@ async function loadState() {
   autoRefreshMinutes = data.autoRefreshMinutes ?? 5;
   language = data.language || "ja";
   backgroundRefresh = data.backgroundRefresh ?? true;
+  isCardView = data.isCardView || false;
+  imageCache = data.imageCache || {};
+  applyViewButtons();
   applyDarkMode();
   applyFont();
   applyLanguage();
@@ -394,9 +405,10 @@ function selectAndRender(sel) {
 
 // CSP blocks inline onerror handlers in extension pages, so bind them here
 function bindFaviconErrors(container) {
-  container.querySelectorAll("img.feed-icon, img.article-favicon").forEach((img) => {
+  container.querySelectorAll("img.feed-icon, img.article-favicon, .article-image img").forEach((img) => {
     img.addEventListener("error", () => {
-      img.style.display = "none";
+      const wrapper = img.closest(".article-image");
+      (wrapper || img).style.display = "none";
     });
   });
 }
@@ -606,8 +618,19 @@ function renderArticles() {
       const isRead = readArticles.has(a.link);
       const isBookmarked = bookmarkedArticles.has(a.link);
       const timeStr = relativeTime(a.pubDate);
+      let imageHtml = "";
+      if (isCardView) {
+        const image = getArticleImage(a);
+        if (image) {
+          imageHtml = `<div class="article-image"><img src="${escapeHtml(image)}" loading="lazy" alt=""></div>`;
+        } else if (image === null) {
+          // Unknown yet: render a hidden slot and fetch og:image from the article page
+          imageHtml = `<div class="article-image pending"></div>`;
+        }
+      }
       return `
       <div class="article-row ${isRead ? "read" : ""}" data-link="${escapeHtml(a.link)}" data-feed-index="${a._feedIndex}">
+        ${imageHtml}
         <div class="article-source">
           <img class="article-favicon" src="${getFaviconUrl(feeds[a._feedIndex])}" width="16" height="16">
           <span class="article-source-name">${escapeHtml(a._feedTitle)}</span>
@@ -627,6 +650,11 @@ function renderArticles() {
     .join("");
 
   bindFaviconErrors(articleListEl);
+  if (isCardView) {
+    articleListEl.querySelectorAll(".article-row").forEach((row) => {
+      if (row.querySelector(".article-image.pending")) queueImageFetch(row.dataset.link);
+    });
+  }
 
   // Bind article events
   articleListEl.querySelectorAll(".article-row").forEach((row) => {
@@ -930,11 +958,14 @@ async function fetchFeed(url) {
     result.siteUrl = channel.querySelector(":scope > link")?.textContent || "";
 
     xml.querySelectorAll("item").forEach((item) => {
+      const description = item.querySelector("description")?.textContent || "";
+      const encoded = item.getElementsByTagNameNS("http://purl.org/rss/1.0/modules/content/", "encoded")[0]?.textContent || "";
       result.items.push({
         title: item.querySelector("title")?.textContent || "",
         link: item.querySelector("link")?.textContent || "",
-        description: item.querySelector("description")?.textContent || "",
+        description,
         pubDate: extractItemDate(item, ["pubDate", "pubdate", "date"]),
+        image: extractItemImage(item, [encoded, description]),
       });
     });
     return result;
@@ -953,14 +984,14 @@ async function fetchFeed(url) {
         entry.querySelector('link[rel="alternate"]')?.getAttribute("href") ||
         entry.querySelector("link")?.getAttribute("href") ||
         "";
+      const summary = entry.querySelector("summary")?.textContent || "";
+      const content = entry.querySelector("content")?.textContent || "";
       result.items.push({
         title: entry.querySelector("title")?.textContent || "",
         link,
-        description:
-          entry.querySelector("summary")?.textContent ||
-          entry.querySelector("content")?.textContent ||
-          "",
+        description: summary || content,
         pubDate: extractItemDate(entry, ["published", "updated", "issued", "modified"]),
+        image: extractItemImage(entry, [content, summary]),
       });
     });
     return result;
@@ -990,6 +1021,171 @@ function extractItemDate(el, tagNames) {
     }
   }
   return "";
+}
+
+// Find a representative image for an item: enclosure / media:thumbnail / media:content,
+// else the first <img> in the HTML body. Returns "" if none.
+function isTinyImage(img, src) {
+  if (/favicon|\/s2\/favicons|st-hatena\.com\/64|\.gif(\?|$)/i.test(src)) return true;
+  const w = parseInt(img.getAttribute("width"), 10);
+  const h = parseInt(img.getAttribute("height"), 10);
+  return (!isNaN(w) && w <= 64) || (!isNaN(h) && h <= 64);
+}
+
+function extractItemImage(el, htmlCandidates) {
+  const HATENA = "http://www.hatena.ne.jp/info/xmlns#";
+  for (const n of el.getElementsByTagNameNS(HATENA, "imageurl")) {
+    const url = (n.textContent || "").trim();
+    if (/^https?:\/\//i.test(url)) return url;
+  }
+  const MRSS = "http://search.yahoo.com/mrss/";
+  for (const enc of el.getElementsByTagName("enclosure")) {
+    const type = enc.getAttribute("type") || "";
+    const url = enc.getAttribute("url") || "";
+    if (url && (type.startsWith("image/") || /\.(jpe?g|png|gif|webp|avif)(\?|$)/i.test(url))) return url;
+  }
+  for (const tag of ["thumbnail", "content"]) {
+    for (const m of el.getElementsByTagNameNS(MRSS, tag)) {
+      const url = m.getAttribute("url") || "";
+      const type = m.getAttribute("type") || "";
+      const medium = m.getAttribute("medium") || "";
+      if (url && (tag === "thumbnail" || medium === "image" || type.startsWith("image/") || /\.(jpe?g|png|gif|webp|avif)(\?|$)/i.test(url))) return url;
+    }
+  }
+  for (const html of htmlCandidates) {
+    if (!html || !html.includes("<")) continue;
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const img of doc.querySelectorAll("img[src]")) {
+      const src = img.getAttribute("src") || "";
+      if (!/^https?:\/\//i.test(src)) continue;
+      if (isTinyImage(img, src)) continue; // skip favicons / tracking pixels
+      return src;
+    }
+  }
+  return "";
+}
+
+// Image for an article. Returns a URL, "" when known to have none, or null when
+// not known yet (the article page must be fetched for og:image).
+// Order: value stored at fetch time -> <img> in description -> page cache.
+const derivedImageCache = new Map();
+function getArticleImage(item) {
+  if (item.image) return item.image;
+  if (!item.link) return "";
+  let derived = derivedImageCache.get(item.link);
+  if (derived === undefined) {
+    derived = "";
+    const html = item.description || "";
+    if (html.includes("<")) {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      for (const img of doc.querySelectorAll("img[src]")) {
+        const candidate = img.getAttribute("src") || "";
+        if (/^https?:\/\//i.test(candidate) && !isTinyImage(img, candidate)) {
+          derived = candidate;
+          break;
+        }
+      }
+    }
+    derivedImageCache.set(item.link, derived);
+  }
+  if (derived) return derived;
+  if (Object.prototype.hasOwnProperty.call(imageCache, item.link)) return imageCache[item.link];
+  return null;
+}
+
+// ===== og:image fetching for cards =====
+function queueImageFetch(link) {
+  if (!link || !/^https?:\/\//i.test(link)) return;
+  if (imageFetchQueued.has(link)) return;
+  imageFetchQueued.add(link);
+  imageFetchQueue.push(link);
+  pumpImageQueue();
+}
+
+function pumpImageQueue() {
+  while (imageFetchActive < IMAGE_FETCH_CONCURRENCY && imageFetchQueue.length > 0) {
+    const link = imageFetchQueue.shift();
+    imageFetchActive++;
+    fetchPageImage(link)
+      .catch(() => "")
+      .then((url) => {
+        imageCache[link] = url;
+        scheduleImageCacheSave();
+        imageFetchQueued.delete(link);
+        applyFetchedImage(link, url);
+      })
+      .finally(() => {
+        imageFetchActive--;
+        pumpImageQueue();
+      });
+  }
+}
+
+async function fetchPageImage(link) {
+  const resp = await fetch(link, { signal: AbortSignal.timeout(10000), credentials: "omit" });
+  if (!resp.ok) return "";
+  const type = resp.headers.get("content-type") || "";
+  if (type && !/html|xml/i.test(type)) return "";
+  // Only read the head of the document; og tags live there
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let html = "";
+  while (html.length < 200000) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    html += decoder.decode(value, { stream: true });
+    if (html.includes("</head>")) break;
+  }
+  reader.cancel().catch(() => {});
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const meta =
+    doc.querySelector('meta[property="og:image"], meta[property="og:image:url"], meta[name="og:image"], meta[name="twitter:image"], meta[property="twitter:image"], meta[name="twitter:image:src"]');
+  const content = meta?.getAttribute("content") || "";
+  if (!content) return "";
+  try {
+    const abs = new URL(content.trim(), link).href;
+    return /^https?:\/\//i.test(abs) ? abs : "";
+  } catch {
+    return "";
+  }
+}
+
+function applyFetchedImage(link, url) {
+  if (!isCardView) return;
+  articleListEl.querySelectorAll(".article-row").forEach((row) => {
+    if (row.dataset.link !== link) return;
+    const slot = row.querySelector(".article-image.pending");
+    if (!slot) return;
+    slot.classList.remove("pending");
+    if (!url) {
+      slot.remove();
+      return;
+    }
+    const img = document.createElement("img");
+    img.alt = "";
+    img.loading = "lazy";
+    img.addEventListener("error", () => slot.remove());
+    img.src = url;
+    slot.appendChild(img);
+  });
+}
+
+function scheduleImageCacheSave() {
+  imageCacheDirty = true;
+  if (imageCacheSaveTimer) return;
+  imageCacheSaveTimer = setTimeout(saveImageCache, 1500);
+}
+
+async function saveImageCache() {
+  imageCacheSaveTimer = null;
+  if (!imageCacheDirty) return;
+  imageCacheDirty = false;
+  // Keep only links still present in feeds, capped at IMAGE_CACHE_MAX
+  const present = new Set();
+  feeds.forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
+  const entries = Object.entries(imageCache).filter(([l]) => present.has(l));
+  imageCache = Object.fromEntries(entries.slice(-IMAGE_CACHE_MAX));
+  await chrome.storage.local.set({ imageCache });
 }
 
 // Parse a feed date string into a millisecond timestamp. Returns null if unparseable.
@@ -1110,9 +1306,14 @@ function toggleBookmark(link, btnEl) {
 // ===== View Toggle =====
 function setView(card) {
   isCardView = card;
-  document.getElementById("btn-view-list").classList.toggle("active", !card);
-  document.getElementById("btn-view-card").classList.toggle("active", card);
+  applyViewButtons();
+  chrome.storage.local.set({ isCardView });
   renderArticles();
+}
+
+function applyViewButtons() {
+  document.getElementById("btn-view-list").classList.toggle("active", !isCardView);
+  document.getElementById("btn-view-card").classList.toggle("active", isCardView);
 }
 
 // ===== Sharing =====
