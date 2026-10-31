@@ -62,17 +62,11 @@ async function updateAllFeeds() {
   for (const feed of feeds) {
     try {
       const resp = await fetch(feed.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const text = await resp.text();
-      const parser = new DOMParser();
-      const xml = parser.parseFromString(text, "text/xml");
-      const newItems = parseItems(xml);
+      const newItems = await parseFeedViaOffscreen(text);
 
-      // Keep existing unread articles not present in the new fetch
-      const newLinks = new Set(newItems.map(i => i.link).filter(Boolean));
-      const keptUnread = (feed.items || []).filter(
-        item => item.link && !newLinks.has(item.link) && !readSet.has(item.link)
-      );
-      feed.items = [...newItems, ...keptUnread];
+      feed.items = mergeFeedItems(feed.items, newItems, (link) => readSet.has(link));
       feed.lastUpdated = Date.now();
       delete feed.error;
     } catch (e) {
@@ -80,41 +74,105 @@ async function updateAllFeeds() {
     }
   }
   await chrome.storage.local.set({ feeds });
+  await closeOffscreenDocument();
 }
 
-function parseItems(xml) {
-  const items = [];
-  // RSS 2.0
-  const rssItems = xml.querySelectorAll("item");
-  if (rssItems.length > 0) {
-    rssItems.forEach((item) => {
-      items.push({
-        title: item.querySelector("title")?.textContent || "",
-        link: item.querySelector("link")?.textContent || "",
-        description: item.querySelector("description")?.textContent || "",
-        pubDate: item.querySelector("pubDate")?.textContent || "",
-      });
-    });
-    return items;
-  }
-  // Atom
-  const entries = xml.querySelectorAll("entry");
-  entries.forEach((entry) => {
-    items.push({
-      title: entry.querySelector("title")?.textContent || "",
-      link:
-        entry.querySelector("link")?.getAttribute("href") ||
-        entry.querySelector("link")?.textContent ||
-        "",
-      description:
-        entry.querySelector("summary")?.textContent ||
-        entry.querySelector("content")?.textContent ||
-        "",
-      pubDate:
-        entry.querySelector("published")?.textContent ||
-        entry.querySelector("updated")?.textContent ||
-        "",
-    });
+// ===== Offscreen document (DOMParser is unavailable in MV3 service workers) =====
+const OFFSCREEN_URL = "offscreen.html";
+let offscreenCreating = null;
+
+async function ensureOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_URL)],
   });
-  return items;
+  if (contexts.length > 0) return;
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen
+      .createDocument({
+        url: OFFSCREEN_URL,
+        reasons: ["DOM_PARSER"],
+        justification: "Parse RSS/Atom feed XML with DOMParser",
+      })
+      .finally(() => {
+        offscreenCreating = null;
+      });
+  }
+  await offscreenCreating;
+}
+
+async function closeOffscreenDocument() {
+  try {
+    await chrome.offscreen.closeDocument();
+  } catch (e) {
+    // No document open — ignore
+  }
+}
+
+async function parseFeedViaOffscreen(text) {
+  await ensureOffscreenDocument();
+  const res = await chrome.runtime.sendMessage({ target: "offscreen", type: "parseFeed", text });
+  if (!res) throw new Error("No response from parser");
+  if (!res.ok) throw new Error(res.error);
+  return res.items;
+}
+
+// ===== Date helpers =====
+// Parse a feed date string into a millisecond timestamp. Returns null if unparseable.
+function parseFeedDate(str) {
+  if (!str) return null;
+  let s = String(str).trim();
+  if (!s) return null;
+
+  // Normalize common non-standard timezone abbreviations
+  s = s.replace(/\b(JST)\b/i, "+0900").replace(/\bUT\b/, "UTC");
+
+  let t = Date.parse(s);
+  if (!isNaN(t)) return t;
+
+  // YYYY-MM-DD[ T]hh:mm[:ss][.sss][Z|+hh:mm|+hhmm]  (also with "/" separators)
+  const m = s.match(
+    /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i
+  );
+  if (m) {
+    const [, y, mo, d, h = "0", mi = "0", se = "0", tz] = m;
+    if (tz) {
+      const tzNorm = tz.toUpperCase() === "Z" ? "Z" : tz.replace(/^([+-]\d{2})(\d{2})$/, "$1:$2");
+      t = Date.parse(
+        `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}T${h.padStart(2, "0")}:${mi}:${se}${tzNorm}`
+      );
+    } else {
+      t = new Date(+y, +mo - 1, +d, +h, +mi, +se).getTime();
+    }
+    if (!isNaN(t)) return t;
+  }
+
+  // Last resort: strip day-of-week / trailing text and retry
+  const stripped = s.replace(/^[A-Za-z]{3,},\s*/, "").replace(/\s*\(.*\)$/, "");
+  t = Date.parse(stripped);
+  return isNaN(t) ? null : t;
+}
+
+// Merge new items with existing items: keep unread items missing from the new fetch,
+// and carry over firstSeen so undated items keep a stable position.
+function mergeFeedItems(existingItems, newItems, isRead) {
+  const now = Date.now();
+  const existingByLink = new Map();
+  (existingItems || []).forEach((it) => {
+    if (it.link) existingByLink.set(it.link, it);
+  });
+  const merged = newItems.map((it) => {
+    const prev = existingByLink.get(it.link);
+    const timestamp = parseFeedDate(it.pubDate);
+    return {
+      ...it,
+      timestamp: timestamp === null ? null : timestamp,
+      firstSeen: prev?.firstSeen || now,
+    };
+  });
+  const newLinks = new Set(newItems.map((it) => it.link).filter(Boolean));
+  const keptUnread = (existingItems || []).filter(
+    (it) => it.link && !newLinks.has(it.link) && !isRead(it.link)
+  );
+  return [...merged, ...keptUnread];
 }

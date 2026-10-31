@@ -643,19 +643,12 @@ function renderArticles() {
         toggleBookmark(row.dataset.link, e.target);
         return;
       }
-      openArticle(row);
+      openOriginal(row, true);
     });
     row.addEventListener("auxclick", (e) => {
       if (e.button === 1) {
         e.preventDefault();
-        const link = row.dataset.link;
-        if (link) {
-          readArticles.add(link);
-          saveReadArticles();
-          row.classList.add("read");
-          renderFeedList();
-          window.open(link, "_blank");
-        }
+        openOriginal(row, false);
       }
     });
   });
@@ -741,11 +734,7 @@ function getFilteredArticles() {
   }
 
   // Sort by date (newest first)
-  articles.sort((a, b) => {
-    const da = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-    const db = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-    return db - da;
-  });
+  articles.sort((a, b) => articleSortTime(b) - articleSortTime(a));
 
   // Hide read articles
   if (hideReadArticles && !tempShowRead) {
@@ -847,7 +836,7 @@ async function addFeed() {
       title: customName || result.title || url,
       description: result.description || "",
       siteUrl: result.siteUrl || "",
-      items: result.items || [],
+      items: mergeItems([], result.items || []),
       folderId: feedFolderSelect.value || null,
       lastUpdated: Date.now(),
     });
@@ -869,12 +858,7 @@ async function addFeed() {
 
 // Merge new items with existing unread items not present in the new fetch
 function mergeItems(existingItems, newItems) {
-  const newLinks = new Set(newItems.map(item => item.link).filter(Boolean));
-  // Keep old items that are unread and not returned in the new fetch
-  const keptUnread = (existingItems || []).filter(
-    item => item.link && !newLinks.has(item.link) && !readArticles.has(item.link)
-  );
-  return [...newItems, ...keptUnread];
+  return mergeFeedItems(existingItems, newItems, (link) => readArticles.has(link));
 }
 
 async function refreshAll() {
@@ -943,7 +927,7 @@ async function fetchFeed(url) {
         title: item.querySelector("title")?.textContent || "",
         link: item.querySelector("link")?.textContent || "",
         description: item.querySelector("description")?.textContent || "",
-        pubDate: item.querySelector("pubDate")?.textContent || "",
+        pubDate: extractItemDate(item, ["pubDate", "pubdate", "date"]),
       });
     });
     return result;
@@ -969,16 +953,119 @@ async function fetchFeed(url) {
           entry.querySelector("summary")?.textContent ||
           entry.querySelector("content")?.textContent ||
           "",
-        pubDate:
-          entry.querySelector("published")?.textContent ||
-          entry.querySelector("updated")?.textContent ||
-          "",
+        pubDate: extractItemDate(entry, ["published", "updated", "issued", "modified"]),
       });
     });
     return result;
   }
 
   throw new Error(t("unsupportedFormat"));
+}
+
+// ===== Date helpers =====
+// Get the first non-empty date string from an item, checking common tag names
+// (pubDate / dc:date / published / updated / date, including namespaced ones)
+function extractItemDate(el, tagNames) {
+  for (const name of tagNames) {
+    const nodes = el.getElementsByTagName(name);
+    for (const n of nodes) {
+      const v = (n.textContent || "").trim();
+      if (v) return v;
+    }
+  }
+  // Namespaced fallbacks (dc:date etc.)
+  const DC = "http://purl.org/dc/elements/1.1/";
+  for (const ns of [DC]) {
+    const nodes = el.getElementsByTagNameNS(ns, "date");
+    for (const n of nodes) {
+      const v = (n.textContent || "").trim();
+      if (v) return v;
+    }
+  }
+  return "";
+}
+
+// Parse a feed date string into a millisecond timestamp. Returns null if unparseable.
+function parseFeedDate(str) {
+  if (!str) return null;
+  let s = String(str).trim();
+  if (!s) return null;
+
+  // Normalize common non-standard timezone abbreviations
+  s = s.replace(/\b(JST)\b/i, "+0900").replace(/\bUT\b/, "UTC");
+
+  let t = Date.parse(s);
+  if (!isNaN(t)) return t;
+
+  // YYYY-MM-DD[ T]hh:mm[:ss][.sss][Z|+hh:mm|+hhmm]  (also with "/" separators)
+  const m = s.match(
+    /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i
+  );
+  if (m) {
+    const [, y, mo, d, h = "0", mi = "0", se = "0", tz] = m;
+    if (tz) {
+      const tzNorm = tz.toUpperCase() === "Z" ? "Z" : tz.replace(/^([+-]\d{2})(\d{2})$/, "$1:$2");
+      t = Date.parse(
+        `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}T${h.padStart(2, "0")}:${mi}:${se}${tzNorm}`
+      );
+    } else {
+      t = new Date(+y, +mo - 1, +d, +h, +mi, +se).getTime();
+    }
+    if (!isNaN(t)) return t;
+  }
+
+  // Last resort: strip day-of-week / trailing text and retry
+  const stripped = s.replace(/^[A-Za-z]{3,},\s*/, "").replace(/\s*\(.*\)$/, "");
+  t = Date.parse(stripped);
+  return isNaN(t) ? null : t;
+}
+
+// Sort key: parsed publication time, else the time we first saw the item
+function articleSortTime(item) {
+  if (typeof item.timestamp === "number") return item.timestamp;
+  const t = parseFeedDate(item.pubDate);
+  if (t !== null) return t;
+  return item.firstSeen || 0;
+}
+
+// Merge new items with existing items: keep unread items missing from the new fetch,
+// and carry over firstSeen so undated items keep a stable position.
+function mergeFeedItems(existingItems, newItems, isRead) {
+  const now = Date.now();
+  const existingByLink = new Map();
+  (existingItems || []).forEach((it) => {
+    if (it.link) existingByLink.set(it.link, it);
+  });
+  const merged = newItems.map((it) => {
+    const prev = existingByLink.get(it.link);
+    const timestamp = parseFeedDate(it.pubDate);
+    return {
+      ...it,
+      timestamp: timestamp === null ? null : timestamp,
+      firstSeen: prev?.firstSeen || now,
+    };
+  });
+  const newLinks = new Set(newItems.map((it) => it.link).filter(Boolean));
+  const keptUnread = (existingItems || []).filter(
+    (it) => it.link && !newLinks.has(it.link) && !isRead(it.link)
+  );
+  return [...merged, ...keptUnread];
+}
+
+// ===== Open Original =====
+// Mark as read and open the original article. active=true focuses the new tab.
+function openOriginal(row, active) {
+  const link = row.dataset.link;
+  if (!link) return;
+  readArticles.add(link);
+  saveReadArticles();
+  row.classList.add("read");
+  renderFeedList(); // update unread counts
+  if (typeof chrome !== "undefined" && chrome.tabs?.create) {
+    chrome.tabs.create({ url: link, active });
+  } else {
+    window.open(link, "_blank");
+  }
 }
 
 // ===== Article Detail =====
@@ -1065,12 +1152,11 @@ function handleShare(btn, link, title) {
 
 // ===== Helpers =====
 function relativeTime(dateStr) {
-  if (!dateStr) return "";
-  const date = new Date(dateStr);
-  if (isNaN(date.getTime())) return "";
+  const ts = parseFeedDate(dateStr);
+  if (ts === null) return "";
 
   const now = Date.now();
-  const diff = now - date.getTime();
+  const diff = now - ts;
   const minutes = Math.floor(diff / 60000);
   const hours = Math.floor(diff / 3600000);
   const days = Math.floor(diff / 86400000);
@@ -1083,8 +1169,9 @@ function relativeTime(dateStr) {
 }
 
 function formatDate(dateStr) {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
+  const ts = parseFeedDate(dateStr);
+  if (ts === null) return dateStr || "";
+  const d = new Date(ts);
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");

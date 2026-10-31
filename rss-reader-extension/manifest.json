@@ -3,7 +3,7 @@
   "name": "RSSリーダー",
   "version": "1.0.0",
   "description": "シンプルなRSSリーダー Chrome拡張機能",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_icon": {

@@ -30,7 +30,7 @@
 - 3ペインレイアウト（サイドバー / 記事一覧 / 記事詳細）
 - リスト表示・カード表示の切り替え
 - 記事の検索
-- 中央クリックで元の記事をバックグラウンドで開く
+- クリックで元の記事を新しいタブで開く（中央クリックならバックグラウンドで開く）
 - SNS共有（X / Facebook）
 
 #### 既読管理
@@ -84,7 +84,7 @@ A simple yet feature-rich RSS reader extension for Chromium-based browsers.
 - 3-pane layout (sidebar / article list / article detail)
 - Toggle between list view and card view
 - Article search
-- Middle-click to open the original article in a background tab
+- Click to open the original article in a new tab (middle-click opens it in the background)
 - Social sharing (X / Facebook)
 
 #### Read Status
