@@ -56,25 +56,47 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function updateAllFeeds() {
-  const { feeds = [], readArticles = [] } = await chrome.storage.local.get(["feeds", "readArticles"]);
-  const readSet = new Set(readArticles);
+  // Skip while the reader tab is open: it refreshes on its own timer.
+  const tabs = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
+  if (tabs.length > 0) return;
 
-  for (const feed of feeds) {
+  const { feeds: snapshot = [] } = await chrome.storage.local.get("feeds");
+  if (snapshot.length === 0) return;
+
+  // Fetch everything first, keyed by URL
+  const results = new Map();
+  for (const feed of snapshot) {
     try {
       const resp = await fetch(feed.url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const text = await resp.text();
-      const newItems = await parseFeedViaOffscreen(text);
-
-      feed.items = mergeFeedItems(feed.items, newItems, (link) => readSet.has(link));
-      feed.lastUpdated = Date.now();
-      delete feed.error;
+      results.set(feed.url, { items: await parseFeedViaOffscreen(text) });
     } catch (e) {
-      feed.error = e.toString();
+      results.set(feed.url, { error: e.message || String(e) });
     }
   }
-  await chrome.storage.local.set({ feeds });
   await closeOffscreenDocument();
+
+  // Re-read storage right before writing so edits made meanwhile (delete / move /
+  // add) are preserved; merge results into the latest list by URL.
+  const { feeds = [], readArticles = [], bookmarkedArticles = [] } =
+    await chrome.storage.local.get(["feeds", "readArticles", "bookmarkedArticles"]);
+  const readSet = new Set(readArticles);
+  const bookmarkSet = new Set(bookmarkedArticles);
+  const shouldKeep = (link) => !readSet.has(link) || bookmarkSet.has(link);
+
+  for (const feed of feeds) {
+    const r = results.get(feed.url);
+    if (!r) continue;
+    if (r.error) {
+      feed.error = r.error;
+      continue;
+    }
+    feed.items = mergeFeedItems(feed.items, r.items, shouldKeep);
+    feed.lastUpdated = Date.now();
+    delete feed.error;
+  }
+  await chrome.storage.local.set({ feeds, readArticles: pruneReadArticles(readArticles, feeds) });
 }
 
 // ===== Offscreen document (DOMParser is unavailable in MV3 service workers) =====
@@ -153,9 +175,10 @@ function parseFeedDate(str) {
   return isNaN(t) ? null : t;
 }
 
-// Merge new items with existing items: keep unread items missing from the new fetch,
-// and carry over firstSeen so undated items keep a stable position.
-function mergeFeedItems(existingItems, newItems, isRead) {
+// Merge new items with existing items: keep items missing from the new fetch when
+// shouldKeep(link) says so (unread / bookmarked), and carry over firstSeen so undated
+// items keep a stable position.
+function mergeFeedItems(existingItems, newItems, shouldKeep) {
   const now = Date.now();
   const existingByLink = new Map();
   (existingItems || []).forEach((it) => {
@@ -171,8 +194,19 @@ function mergeFeedItems(existingItems, newItems, isRead) {
     };
   });
   const newLinks = new Set(newItems.map((it) => it.link).filter(Boolean));
-  const keptUnread = (existingItems || []).filter(
-    (it) => it.link && !newLinks.has(it.link) && !isRead(it.link)
+  const kept = (existingItems || []).filter(
+    (it) => it.link && !newLinks.has(it.link) && shouldKeep(it.link)
   );
-  return [...merged, ...keptUnread];
+  return [...merged, ...kept];
+}
+
+// Drop read-marks for links no longer present in any feed, keeping the most recent
+// MAX_STALE_READ of them so re-published old items don't come back as unread.
+const MAX_STALE_READ = 2000;
+function pruneReadArticles(readList, feedList) {
+  const present = new Set();
+  (feedList || []).forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
+  const stale = readList.filter((l) => !present.has(l));
+  const keepStale = new Set(stale.slice(-MAX_STALE_READ));
+  return readList.filter((l) => present.has(l) || keepStale.has(l));
 }

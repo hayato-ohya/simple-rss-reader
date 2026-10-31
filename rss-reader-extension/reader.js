@@ -19,9 +19,6 @@ const translations = {
     shareTwitter: "Twitterで共有",
     shareFacebook: "Facebookで共有",
     bookmark: "ブックマーク",
-    bookmarked: "ブックマーク済み",
-    openOriginal: "元の記事を開く ↗",
-    noContent: "内容がありません",
     moveToFolder: "フォルダに移動",
     removeFromFolder: "フォルダから外す",
     deleteFeed: "フィードを削除",
@@ -84,9 +81,6 @@ const translations = {
     shareTwitter: "Share on Twitter",
     shareFacebook: "Share on Facebook",
     bookmark: "Bookmark",
-    bookmarked: "Bookmarked",
-    openOriginal: "Open original ↗",
-    noContent: "No content available",
     moveToFolder: "Move to Folder",
     removeFromFolder: "Remove from Folder",
     deleteFeed: "Delete Feed",
@@ -156,6 +150,8 @@ let fontFamily = "";
 let autoRefreshMinutes = 5;
 let autoRefreshTimer = null;
 let backgroundRefresh = true;
+let refreshing = false;
+let lastSavedFeedsJson = null; // to ignore storage.onChanged for our own writes
 
 // ===== DOM Elements =====
 const feedListEl = document.getElementById("feed-list");
@@ -167,8 +163,6 @@ const modalError = document.getElementById("modal-error");
 const feedUrlInput = document.getElementById("feed-url-input");
 const feedNameInput = document.getElementById("feed-name-input");
 const feedFolderSelect = document.getElementById("feed-folder-select");
-const detailOverlay = document.getElementById("detail-overlay");
-const detailContent = document.getElementById("detail-content");
 const folderModalOverlay = document.getElementById("folder-modal-overlay");
 const folderNameInput = document.getElementById("folder-name-input");
 const folderModalError = document.getElementById("folder-modal-error");
@@ -187,7 +181,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // When background service worker updates feeds in storage, reload and re-render
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.feeds) {
-      feeds = changes.feeds.newValue || [];
+      const incoming = changes.feeds.newValue || [];
+      if (JSON.stringify(incoming) === lastSavedFeedsJson) return; // our own write
+      feeds = incoming;
       renderFeedList();
       renderArticles();
     }
@@ -215,6 +211,7 @@ async function loadState() {
 }
 
 async function saveFeeds() {
+  lastSavedFeedsJson = JSON.stringify(feeds);
   await chrome.storage.local.set({ feeds });
 }
 
@@ -223,6 +220,7 @@ async function saveFolders() {
 }
 
 async function saveReadArticles() {
+  readArticles = new Set(pruneReadArticles([...readArticles], feeds));
   await chrome.storage.local.set({ readArticles: [...readArticles] });
 }
 
@@ -238,7 +236,6 @@ function bindEvents() {
   document.getElementById("btn-modal-add").addEventListener("click", addFeed);
   document.getElementById("btn-folder-modal-cancel").addEventListener("click", closeFolderModal);
   document.getElementById("btn-folder-modal-add").addEventListener("click", addFolder);
-  document.getElementById("btn-close-detail").addEventListener("click", closeDetail);
   document.getElementById("btn-refresh").addEventListener("click", refreshAll);
   document.getElementById("btn-view-list").addEventListener("click", () => setView(false));
   document.getElementById("btn-view-card").addEventListener("click", () => setView(true));
@@ -261,8 +258,17 @@ function bindEvents() {
     if (e.target === folderModalOverlay) closeFolderModal();
   });
 
-  detailOverlay.addEventListener("click", (e) => {
-    if (e.target === detailOverlay) closeDetail();
+  // Drop target: remove from folder (sidebar itself)
+  feedListEl.addEventListener("dragover", (e) => e.preventDefault());
+  feedListEl.addEventListener("drop", async (e) => {
+    if (e.target !== feedListEl) return;
+    e.preventDefault();
+    const feedIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
+    if (!isNaN(feedIdx) && feeds[feedIdx]) {
+      feeds[feedIdx].folderId = null;
+      await saveFeeds();
+      renderFeedList();
+    }
   });
 
   feedUrlInput.addEventListener("keydown", (e) => {
@@ -282,7 +288,6 @@ function bindEvents() {
 
 // ===== Feed List Rendering =====
 function renderFeedList() {
-  tempShowRead = false;
   feedListEl.innerHTML = "";
 
   // "All Feeds" item
@@ -293,11 +298,7 @@ function renderFeedList() {
     <span class="feed-name">${t("allFeeds")}</span>
     <span class="feed-count">${getTotalUnread()}</span>
   `;
-  allLi.addEventListener("click", () => {
-    selection = { type: "all" };
-    renderFeedList();
-    renderArticles();
-  });
+  allLi.addEventListener("click", () => selectAndRender({ type: "all" }));
   feedListEl.appendChild(allLi);
 
   // "Bookmarks" item
@@ -308,11 +309,7 @@ function renderFeedList() {
     <span class="feed-name">${t("bookmarks")}</span>
     <span class="feed-count">${bookmarkedArticles.size}</span>
   `;
-  bookmarkLi.addEventListener("click", () => {
-    selection = { type: "bookmark" };
-    renderFeedList();
-    renderArticles();
-  });
+  bookmarkLi.addEventListener("click", () => selectAndRender({ type: "bookmark" }));
   feedListEl.appendChild(bookmarkLi);
 
   // Feeds not in any folder
@@ -343,11 +340,7 @@ function renderFeedList() {
       renderFeedList();
     });
 
-    folderLi.addEventListener("click", () => {
-      selection = { type: "folder", folderId: folder.id };
-      renderFeedList();
-      renderArticles();
-    });
+    folderLi.addEventListener("click", () => selectAndRender({ type: "folder", folderId: folder.id }));
 
     folderLi.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -388,18 +381,23 @@ function renderFeedList() {
     }
   });
 
-  // Drop target: remove from folder (sidebar itself)
-  feedListEl.addEventListener("dragover", (e) => e.preventDefault());
-  feedListEl.addEventListener("drop", async (e) => {
-    if (e.target === feedListEl) {
-      e.preventDefault();
-      const feedIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
-      if (!isNaN(feedIdx) && feeds[feedIdx]) {
-        feeds[feedIdx].folderId = null;
-        await saveFeeds();
-        renderFeedList();
-      }
-    }
+  bindFaviconErrors(feedListEl);
+}
+
+// Change the current selection; this also ends any temporary "show read" view
+function selectAndRender(sel) {
+  selection = sel;
+  tempShowRead = false;
+  renderFeedList();
+  renderArticles();
+}
+
+// CSP blocks inline onerror handlers in extension pages, so bind them here
+function bindFaviconErrors(container) {
+  container.querySelectorAll("img.feed-icon, img.article-favicon").forEach((img) => {
+    img.addEventListener("error", () => {
+      img.style.display = "none";
+    });
   });
 }
 
@@ -415,17 +413,13 @@ function createFeedLi(feed, idx) {
     ? `<span class="feed-error" title="${escapeHtml(feed.error)}">⚠</span>`
     : "";
   li.innerHTML = `
-    <img class="feed-icon" src="${faviconUrl}" onerror="this.style.display='none'">
+    <img class="feed-icon" src="${faviconUrl}">
     <span class="feed-name" title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</span>
     ${errorIcon}
     <span class="feed-count">${getUnreadCount(feed)}</span>
   `;
 
-  li.addEventListener("click", () => {
-    selection = { type: "feed", feedIndex: idx };
-    renderFeedList();
-    renderArticles();
-  });
+  li.addEventListener("click", () => selectAndRender({ type: "feed", feedIndex: idx }));
 
   li.addEventListener("contextmenu", (e) => {
     e.preventDefault();
@@ -615,7 +609,7 @@ function renderArticles() {
       return `
       <div class="article-row ${isRead ? "read" : ""}" data-link="${escapeHtml(a.link)}" data-feed-index="${a._feedIndex}">
         <div class="article-source">
-          <img src="${getFaviconUrl(feeds[a._feedIndex])}" onerror="this.style.display='none'" width="16" height="16">
+          <img class="article-favicon" src="${getFaviconUrl(feeds[a._feedIndex])}" width="16" height="16">
           <span class="article-source-name">${escapeHtml(a._feedTitle)}</span>
         </div>
         <span class="article-title" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</span>
@@ -631,6 +625,8 @@ function renderArticles() {
     `;
     })
     .join("");
+
+  bindFaviconErrors(articleListEl);
 
   // Bind article events
   articleListEl.querySelectorAll(".article-row").forEach((row) => {
@@ -858,38 +854,49 @@ async function addFeed() {
 
 // Merge new items with existing unread items not present in the new fetch
 function mergeItems(existingItems, newItems) {
-  return mergeFeedItems(existingItems, newItems, (link) => readArticles.has(link));
+  return mergeFeedItems(
+    existingItems,
+    newItems,
+    (link) => !readArticles.has(link) || bookmarkedArticles.has(link)
+  );
 }
 
 async function refreshAll() {
+  if (refreshing) return;
+  refreshing = true;
   const btn = document.getElementById("btn-refresh");
   btn.textContent = "⏳";
   btn.disabled = true;
 
-  for (let i = 0; i < feeds.length; i++) {
-    try {
-      const result = await fetchFeed(feeds[i].url);
-      feeds[i].items = mergeItems(feeds[i].items, result.items);
-      feeds[i].lastUpdated = Date.now();
-      feeds[i].error = null;
-      if (!feeds[i].title || feeds[i].title === feeds[i].url) {
-        feeds[i].title = result.title || feeds[i].url;
+  try {
+    for (let i = 0; i < feeds.length; i++) {
+      if (!feeds[i]) break; // feeds may have been removed meanwhile
+      try {
+        const result = await fetchFeed(feeds[i].url);
+        feeds[i].items = mergeItems(feeds[i].items, result.items);
+        feeds[i].lastUpdated = Date.now();
+        feeds[i].error = null;
+        if (!feeds[i].title || feeds[i].title === feeds[i].url) {
+          feeds[i].title = result.title || feeds[i].url;
+        }
+        if (result.description) {
+          feeds[i].description = result.description;
+        }
+      } catch (e) {
+        feeds[i].error = e.message || String(e);
+        console.warn(`Failed to refresh: ${feeds[i].url}`, e);
       }
-      if (result.description) {
-        feeds[i].description = result.description;
-      }
-    } catch (e) {
-      feeds[i].error = e.message || String(e);
-      console.warn(`Failed to refresh: ${feeds[i].url}`, e);
+      // Update UI and save after each feed so articles appear incrementally
+      await saveFeeds();
+      renderFeedList();
+      renderArticles();
     }
-    // Update UI and save after each feed so articles appear incrementally
-    await saveFeeds();
-    renderFeedList();
-    renderArticles();
+    await saveReadArticles(); // prunes stale read entries
+  } finally {
+    btn.textContent = "⟳";
+    btn.disabled = false;
+    refreshing = false;
   }
-
-  btn.textContent = "⟳";
-  btn.disabled = false;
 }
 
 function startAutoRefresh() {
@@ -1028,9 +1035,10 @@ function articleSortTime(item) {
   return item.firstSeen || 0;
 }
 
-// Merge new items with existing items: keep unread items missing from the new fetch,
-// and carry over firstSeen so undated items keep a stable position.
-function mergeFeedItems(existingItems, newItems, isRead) {
+// Merge new items with existing items: keep items missing from the new fetch when
+// shouldKeep(link) says so (unread / bookmarked), and carry over firstSeen so undated
+// items keep a stable position.
+function mergeFeedItems(existingItems, newItems, shouldKeep) {
   const now = Date.now();
   const existingByLink = new Map();
   (existingItems || []).forEach((it) => {
@@ -1046,10 +1054,21 @@ function mergeFeedItems(existingItems, newItems, isRead) {
     };
   });
   const newLinks = new Set(newItems.map((it) => it.link).filter(Boolean));
-  const keptUnread = (existingItems || []).filter(
-    (it) => it.link && !newLinks.has(it.link) && !isRead(it.link)
+  const kept = (existingItems || []).filter(
+    (it) => it.link && !newLinks.has(it.link) && shouldKeep(it.link)
   );
-  return [...merged, ...keptUnread];
+  return [...merged, ...kept];
+}
+
+// Drop read-marks for links no longer present in any feed, keeping the most recent
+// MAX_STALE_READ of them so re-published old items don't come back as unread.
+const MAX_STALE_READ = 2000;
+function pruneReadArticles(readList, feedList) {
+  const present = new Set();
+  (feedList || []).forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
+  const stale = readList.filter((l) => !present.has(l));
+  const keepStale = new Set(stale.slice(-MAX_STALE_READ));
+  return readList.filter((l) => present.has(l) || keepStale.has(l));
 }
 
 // ===== Open Original =====
@@ -1068,44 +1087,6 @@ function openOriginal(row, active) {
   }
 }
 
-// ===== Article Detail =====
-function openArticle(row) {
-  const link = row.dataset.link;
-  const feedIndex = parseInt(row.dataset.feedIndex, 10);
-  const feed = feeds[feedIndex];
-  const article = feed?.items?.find((it) => it.link === link);
-  if (!article) return;
-
-  // Mark as read
-  readArticles.add(link);
-  saveReadArticles();
-  row.classList.add("read");
-  renderFeedList(); // update unread counts
-
-  // Show detail
-  const isBookmarked = bookmarkedArticles.has(article.link);
-  detailContent.innerHTML = `
-    <h2>${escapeHtml(article.title)}</h2>
-    <div class="detail-meta">
-      <span>${escapeHtml(feed.title)}</span>
-      <span>${article.pubDate ? formatDate(article.pubDate) : ""}</span>
-      <button class="detail-bookmark-btn ${isBookmarked ? "bookmarked" : ""}" data-link="${escapeHtml(article.link)}">${isBookmarked ? "★ " + t("bookmarked") : "☆ " + t("bookmark")}</button>
-    </div>
-    <div class="detail-body">${sanitizeHtml(article.description)}</div>
-    <a class="detail-link" href="${escapeHtml(article.link)}" target="_blank" rel="noopener">
-      ${t("openOriginal")}
-    </a>
-  `;
-  detailContent.querySelector(".detail-bookmark-btn").addEventListener("click", (e) => {
-    toggleBookmark(e.target.dataset.link, e.target);
-  });
-  detailOverlay.classList.remove("hidden");
-}
-
-function closeDetail() {
-  detailOverlay.classList.add("hidden");
-}
-
 // ===== Bookmark =====
 function toggleBookmark(link, btnEl) {
   if (!link) return;
@@ -1121,11 +1102,7 @@ function toggleBookmark(link, btnEl) {
   if (btnEl) {
     const now = !wasBookmarked;
     btnEl.classList.toggle("bookmarked", now);
-    if (btnEl.classList.contains("detail-bookmark-btn")) {
-      btnEl.textContent = now ? "★ " + t("bookmarked") : "☆ " + t("bookmark");
-    } else {
-      btnEl.textContent = now ? "★" : "☆";
-    }
+    btnEl.textContent = now ? "★" : "☆";
   }
   renderFeedList();
 }
@@ -1213,16 +1190,6 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function sanitizeHtml(html) {
-  if (!html) return `<p>${t("noContent")}</p>`;
-  // Basic sanitization: allow only safe tags
-  const div = document.createElement("div");
-  div.innerHTML = html;
-  // Remove script tags
-  div.querySelectorAll("script, style, iframe, object, embed").forEach((el) => el.remove());
-  return div.innerHTML;
 }
 
 function showModalError(msg) {

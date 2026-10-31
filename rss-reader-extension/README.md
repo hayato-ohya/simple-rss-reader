@@ -27,7 +27,7 @@
 - 読み込みエラー時の⚠アイコン表示
 
 #### 記事閲覧
-- 3ペインレイアウト（サイドバー / 記事一覧 / 記事詳細）
+- 2ペインレイアウト（サイドバー / 記事一覧）
 - リスト表示・カード表示の切り替え
 - 記事の検索
 - クリックで元の記事を新しいタブで開く（中央クリックならバックグラウンドで開く）
@@ -81,7 +81,7 @@ A simple yet feature-rich RSS reader extension for Chromium-based browsers.
 - ⚠ error indicator for feeds that fail to load
 
 #### Article Reading
-- 3-pane layout (sidebar / article list / article detail)
+- 2-pane layout (sidebar / article list)
 - Toggle between list view and card view
 - Article search
 - Click to open the original article in a new tab (middle-click opens it in the background)

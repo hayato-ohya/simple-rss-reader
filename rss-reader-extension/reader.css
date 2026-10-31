@@ -465,26 +465,6 @@ html.dark #feed-list li .feed-error {
   opacity: 1;
 }
 
-.detail-bookmark-btn {
-  background: none;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-  color: #666;
-  padding: 2px 8px;
-  margin-left: 4px;
-}
-
-.detail-bookmark-btn:hover {
-  background: #f0f0f0;
-}
-
-.detail-bookmark-btn.bookmarked {
-  color: #e6a700;
-  border-color: #e6a700;
-}
-
 html.dark .bookmark-btn {
   color: #666;
 }
@@ -492,28 +472,6 @@ html.dark .bookmark-btn {
 html.dark .bookmark-btn:hover,
 html.dark .bookmark-btn.bookmarked {
   color: #f0b800;
-}
-
-html.dark .detail-bookmark-btn {
-  color: #aaa;
-  border-color: #555;
-}
-
-html.dark .detail-bookmark-btn:hover {
-  background: #383838;
-}
-
-html.dark .detail-bookmark-btn.bookmarked {
-  color: #f0b800;
-  border-color: #f0b800;
-}
-
-.article-time {
-  font-size: 12px;
-  color: #999;
-  white-space: nowrap;
-  min-width: 70px;
-  text-align: right;
 }
 
 /* ===== Card View ===== */
@@ -702,91 +660,6 @@ html.dark .show-read-btn:hover {
 #btn-modal-add:hover,
 #btn-folder-modal-add:hover {
   background: #3367d6;
-}
-
-/* ===== Detail Panel ===== */
-#detail-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.3);
-  z-index: 100;
-  display: flex;
-  justify-content: flex-end;
-}
-
-#detail-overlay.hidden {
-  display: none;
-}
-
-#detail-panel {
-  width: 55%;
-  max-width: 700px;
-  background: #fff;
-  height: 100%;
-  overflow-y: auto;
-  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.15);
-}
-
-#detail-header {
-  display: flex;
-  justify-content: flex-end;
-  padding: 10px 14px;
-  border-bottom: 1px solid #eee;
-}
-
-#btn-close-detail {
-  background: none;
-  border: none;
-  font-size: 18px;
-  cursor: pointer;
-  color: #666;
-  padding: 2px 6px;
-  border-radius: 3px;
-}
-
-#btn-close-detail:hover {
-  background: #eee;
-}
-
-#detail-content {
-  padding: 20px 24px;
-}
-
-#detail-content h2 {
-  font-size: 18px;
-  margin-bottom: 8px;
-  line-height: 1.5;
-}
-
-#detail-content .detail-meta {
-  font-size: 12px;
-  color: #888;
-  margin-bottom: 16px;
-  display: flex;
-  gap: 12px;
-}
-
-#detail-content .detail-body {
-  font-size: 14px;
-  line-height: 1.8;
-  color: #444;
-}
-
-#detail-content .detail-body img {
-  max-width: 100%;
-  height: auto;
-}
-
-#detail-content .detail-link {
-  display: inline-block;
-  margin-top: 16px;
-  color: #4285f4;
-  text-decoration: none;
-  font-size: 13px;
-}
-
-#detail-content .detail-link:hover {
-  text-decoration: underline;
 }
 
 /* ===== Loading ===== */
@@ -1028,40 +901,6 @@ html.dark #btn-folder-modal-cancel {
 html.dark #btn-modal-cancel:hover,
 html.dark #btn-folder-modal-cancel:hover {
   background: #555;
-}
-
-/* Dark detail panel */
-html.dark #detail-panel {
-  background: #252525;
-  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.4);
-}
-
-html.dark #detail-header {
-  border-bottom-color: #444;
-}
-
-html.dark #btn-close-detail {
-  color: #aaa;
-}
-
-html.dark #btn-close-detail:hover {
-  background: #444;
-}
-
-html.dark #detail-content h2 {
-  color: #ddd;
-}
-
-html.dark #detail-content .detail-meta {
-  color: #777;
-}
-
-html.dark #detail-content .detail-body {
-  color: #bbb;
-}
-
-html.dark #detail-content .detail-link {
-  color: #5599dd;
 }
 
 /* Dark context menu */
