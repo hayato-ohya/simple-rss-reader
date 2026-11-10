@@ -16,6 +16,9 @@ const translations = {
     noFeedsHint: "「フィードを追加」からRSSフィードを登録してください",
     noArticles: "記事がありません",
     showReadArticles: "既読の記事を表示",
+    markAllRead: "すべて既読にする",
+    markAllReadConfirm: "表示中の未読 ${n} 件をすべて既読にしますか？",
+    feedExists: "このフィードは登録済みです",
     shareTwitter: "Twitterで共有",
     shareFacebook: "Facebookで共有",
     bookmark: "ブックマーク",
@@ -78,6 +81,9 @@ const translations = {
     noFeedsHint: "Click \"Add Feed\" to register an RSS feed",
     noArticles: "No articles",
     showReadArticles: "Show read articles",
+    markAllRead: "Mark all as read",
+    markAllReadConfirm: "Mark the ${n} unread article(s) in this view as read?",
+    feedExists: "This feed is already registered",
     shareTwitter: "Share on Twitter",
     shareFacebook: "Share on Facebook",
     bookmark: "Bookmark",
@@ -151,6 +157,10 @@ let autoRefreshMinutes = 5;
 let autoRefreshTimer = null;
 let backgroundRefresh = true;
 let refreshing = false;
+// Timestamps used to tell user scrolling apart from scrolls we trigger ourselves
+let lastUserScrollAt = -Infinity;
+let lastProgrammaticScrollAt = -Infinity;
+const USER_SCROLL_WINDOW_MS = 1500;
 let imageCache = {}; // link -> image URL ("" = none found)
 let imageCacheDirty = false;
 let imageCacheSaveTimer = null;
@@ -184,16 +194,57 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Set icon on load and watch for OS color scheme changes
   updateActionIcon();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateActionIcon);
-  // Refresh all feeds on open
-  refreshAll();
+  // Refresh on open only if the stored data is stale (background refresh keeps it fresh)
+  if (isStale()) refreshAll();
   // When background service worker updates feeds in storage, reload and re-render
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.feeds) {
+    if (area !== "local") return;
+    // Pick up changes made by another reader tab, so that saving from this tab doesn't
+    // overwrite them with stale state. (Our own writes arrive here too and are no-ops.)
+    if (changes.readArticles) {
+      // Read marks are only ever added by the user, so merge rather than replace
+      let added = false;
+      for (const link of changes.readArticles.newValue || []) {
+        if (!readArticles.has(link)) {
+          readArticles.add(link);
+          added = true;
+        }
+      }
+      if (added) {
+        renderFeedList();
+        renderArticles();
+      }
+    }
+    if (changes.bookmarkedArticles) {
+      const incoming = changes.bookmarkedArticles.newValue || [];
+      if (incoming.length !== bookmarkedArticles.size || incoming.some((l) => !bookmarkedArticles.has(l))) {
+        bookmarkedArticles = new Set(incoming);
+        renderFeedList();
+        renderArticles();
+      }
+    }
+    if (changes.folders) {
+      const incoming = changes.folders.newValue || [];
+      if (JSON.stringify(incoming) !== JSON.stringify(folders)) {
+        folders = incoming;
+        if (selection.type === "folder" && !folders.some((f) => f.id === selection.folderId)) {
+          selection = { type: "all" };
+        }
+        renderFeedList();
+        renderArticles();
+      }
+    }
+    if (changes.feeds) {
+      if (refreshing) return; // our own incremental saves
       const incoming = changes.feeds.newValue || [];
       if (JSON.stringify(incoming) === lastSavedFeedsJson) return; // our own write
       feeds = incoming;
       renderFeedList();
       renderArticles();
+    }
+    if (changes.imageCache && !imageCacheDirty) {
+      imageCache = changes.imageCache.newValue || {};
+      if (isCardView) renderArticles();
     }
   });
 });
@@ -248,6 +299,7 @@ function bindEvents() {
   document.getElementById("btn-folder-modal-cancel").addEventListener("click", closeFolderModal);
   document.getElementById("btn-folder-modal-add").addEventListener("click", addFolder);
   document.getElementById("btn-refresh").addEventListener("click", refreshAll);
+  document.getElementById("btn-mark-all-read").addEventListener("click", markAllRead);
   document.getElementById("btn-view-list").addEventListener("click", () => setView(false));
   document.getElementById("btn-view-card").addEventListener("click", () => setView(true));
 
@@ -258,8 +310,18 @@ function bindEvents() {
 
   searchInput.addEventListener("input", (e) => {
     searchQuery = e.target.value.toLowerCase();
+    setScrollTop(0);
     renderArticles();
   });
+
+  // Remember when the user last scrolled the list; only such scrolls may mark articles read
+  articleListEl.addEventListener(
+    "scroll",
+    () => {
+      if (performance.now() - lastProgrammaticScrollAt > 300) lastUserScrollAt = performance.now();
+    },
+    { passive: true }
+  );
 
   modalOverlay.addEventListener("click", (e) => {
     if (e.target === modalOverlay) closeModal();
@@ -282,12 +344,13 @@ function bindEvents() {
     }
   });
 
+  // isComposing: Enter that confirms an IME conversion must not submit the form
   feedUrlInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") addFeed();
+    if (e.key === "Enter" && !e.isComposing) addFeed();
   });
 
   folderNameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") addFolder();
+    if (e.key === "Enter" && !e.isComposing) addFolder();
   });
 
   // Close context menu on click elsewhere
@@ -318,7 +381,7 @@ function renderFeedList() {
   bookmarkLi.innerHTML = `
     <span class="feed-icon" style="font-size:14px;">🔖</span>
     <span class="feed-name">${t("bookmarks")}</span>
-    <span class="feed-count">${bookmarkedArticles.size}</span>
+    <span class="feed-count">${getBookmarkCount()}</span>
   `;
   bookmarkLi.addEventListener("click", () => selectAndRender({ type: "bookmark" }));
   feedListEl.appendChild(bookmarkLi);
@@ -396,9 +459,16 @@ function renderFeedList() {
 }
 
 // Change the current selection; this also ends any temporary "show read" view
+// Scroll the list ourselves without it counting as a user scroll
+function setScrollTop(v) {
+  lastProgrammaticScrollAt = performance.now();
+  articleListEl.scrollTop = v;
+}
+
 function selectAndRender(sel) {
   selection = sel;
   tempShowRead = false;
+  setScrollTop(0);
   renderFeedList();
   renderArticles();
 }
@@ -446,6 +516,17 @@ function createFeedLi(feed, idx) {
   li.addEventListener("dragend", () => li.classList.remove("dragging"));
 
   return li;
+}
+
+// Add a context / settings menu to the page, nudged back inside the window if it would
+// stick out (its height is capped in CSS, so it scrolls instead of being cut off).
+function showMenu(menu) {
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(r.left, window.innerWidth - r.width - 4));
+  const top = Math.max(4, Math.min(r.top, window.innerHeight - r.height - 4));
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
 }
 
 function showFeedContextMenu(e, feedIndex) {
@@ -505,6 +586,14 @@ function showFeedContextMenu(e, feedIndex) {
       if (selection.feedIndex === feedIndex) selection = { type: "all" };
       else if (selection.feedIndex > feedIndex) selection.feedIndex--;
     }
+    // Bookmarks only store links; drop the ones whose article went away with the feed
+    const present = new Set();
+    feeds.forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
+    const remaining = [...bookmarkedArticles].filter((l) => present.has(l));
+    if (remaining.length !== bookmarkedArticles.size) {
+      bookmarkedArticles = new Set(remaining);
+      await saveBookmarks();
+    }
     await saveFeeds();
     renderFeedList();
     renderArticles();
@@ -512,7 +601,7 @@ function showFeedContextMenu(e, feedIndex) {
   });
 
   menu.appendChild(deleteBtn);
-  document.body.appendChild(menu);
+  showMenu(menu);
 }
 
 function showFolderContextMenu(e, folder) {
@@ -560,7 +649,7 @@ function showFolderContextMenu(e, folder) {
     menu.remove();
   });
   menu.appendChild(deleteBtn);
-  document.body.appendChild(menu);
+  showMenu(menu);
 }
 
 // ===== Article List Rendering =====
@@ -583,6 +672,7 @@ function renderArticles() {
   }
 
   if (feeds.length === 0) {
+    articleListEl.className = "";
     articleListEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">📡</div>
@@ -594,6 +684,9 @@ function renderArticles() {
   }
 
   if (articles.length === 0) {
+    // Drop the card-view class: as a wrapping flex container it would shrink the
+    // empty-state block to its content and pin it to the left edge.
+    articleListEl.className = "";
     // Check if there are read articles being hidden
     const hasHiddenRead = hideReadArticles && !tempShowRead && getFilteredArticlesIgnoringRead().length > 0;
     articleListEl.innerHTML = `
@@ -612,73 +705,142 @@ function renderArticles() {
     return;
   }
 
-  articleListEl.className = isCardView ? "card-view" : "";
-  articleListEl.innerHTML = articles
-    .map((a) => {
-      const isRead = readArticles.has(a.link);
-      const isBookmarked = bookmarkedArticles.has(a.link);
-      const timeStr = relativeTime(a.pubDate);
-      let imageHtml = "";
-      if (isCardView) {
-        const image = getArticleImage(a);
-        if (image) {
-          imageHtml = `<div class="article-image"><img src="${escapeHtml(image)}" loading="lazy" alt=""></div>`;
-        } else if (image === null) {
-          // Unknown yet: render a hidden slot and fetch og:image from the article page
-          imageHtml = `<div class="article-image pending"></div>`;
-        }
-      }
-      return `
-      <div class="article-row ${isRead ? "read" : ""}" data-link="${escapeHtml(a.link)}" data-feed-index="${a._feedIndex}">
+  const viewClass = isCardView ? "card-view" : "";
+  const viewChanged = articleListEl.className !== viewClass;
+  articleListEl.className = viewClass;
+
+  // Keep the first visible row anchored so inserting rows above doesn't shift the view.
+  // At the very top we don't anchor: new articles should appear in view, not above it.
+  const surviving = new Set(articles.map((a) => a.link));
+  const anchor = articleListEl.scrollTop > 0 ? findAnchorRow(surviving) : null;
+
+  // Reuse existing rows (same link) so in-flight image loads and the user's place survive
+  const existing = new Map();
+  if (!viewChanged) {
+    articleListEl.querySelectorAll(":scope > .article-row").forEach((row) => existing.set(row.dataset.link, row));
+  }
+  const usedLinks = new Set();
+  const rows = [];
+  for (const a of articles) {
+    if (usedLinks.has(a.link)) continue; // same URL in several feeds: show it once
+    usedLinks.add(a.link);
+    const row = existing.get(a.link);
+    if (row) {
+      updateArticleRow(row, a);
+      rows.push(row);
+    } else {
+      rows.push(createArticleRow(a));
+    }
+  }
+  articleListEl.replaceChildren(...rows);
+
+  if (anchor && anchor.row.isConnected) {
+    const newTop = anchor.row.getBoundingClientRect().top;
+    if (newTop !== anchor.top) setScrollTop(articleListEl.scrollTop + (newTop - anchor.top));
+  }
+
+  if (isCardView) {
+    rows.forEach((row) => {
+      if (row.querySelector(".article-image.pending")) queueImageFetch(row.dataset.link);
+    });
+  }
+
+  // Mark as read on scroll (IntersectionObserver)
+  setupScrollReadObserver();
+}
+
+// The first row (among those that will still be shown) whose bottom edge is inside the
+// viewport, with its current top offset
+function findAnchorRow(surviving) {
+  const rootTop = articleListEl.getBoundingClientRect().top;
+  for (const row of articleListEl.querySelectorAll(":scope > .article-row")) {
+    if (!surviving.has(row.dataset.link)) continue;
+    const r = row.getBoundingClientRect();
+    if (r.bottom > rootTop) return { row, top: r.top };
+  }
+  return null;
+}
+
+function createArticleRow(a) {
+  const isRead = readArticles.has(a.link);
+  const isBookmarked = bookmarkedArticles.has(a.link);
+  let imageHtml = "";
+  if (isCardView) {
+    const image = getArticleImage(a);
+    if (image) {
+      imageHtml = `<div class="article-image"><img src="${escapeHtml(image)}" loading="lazy" alt=""></div>`;
+    } else if (image === null) {
+      // Unknown yet: render a hidden slot and fetch og:image from the article page
+      imageHtml = `<div class="article-image pending"></div>`;
+    }
+  }
+  const row = document.createElement("div");
+  row.className = "article-row" + (isRead ? " read" : "");
+  row.dataset.link = a.link;
+  row.dataset.feedIndex = String(a._feedIndex);
+  row.innerHTML = `
         ${imageHtml}
         <div class="article-source">
           <img class="article-favicon" src="${getFaviconUrl(feeds[a._feedIndex])}" width="16" height="16">
           <span class="article-source-name">${escapeHtml(a._feedTitle)}</span>
         </div>
-        <span class="article-title" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</span>
+        <a class="article-title"${isHttpUrl(a.link) ? ` href="${escapeHtml(a.link.trim())}"` : ""} rel="noopener" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</a>
         <div class="article-meta">
           <div class="article-share">
             <button class="bookmark-btn ${isBookmarked ? "bookmarked" : ""}" title="${t("bookmark")}">${isBookmarked ? "★" : "☆"}</button>
             <button class="share-btn" data-share="twitter" title="${t("shareTwitter")}">𝕏</button>
             <button class="share-btn" data-share="facebook" title="${t("shareFacebook")}">f</button>
           </div>
-          <span class="article-time">${timeStr}</span>
+          <span class="article-time">${relativeTime(a.pubDate)}</span>
         </div>
-      </div>
-    `;
-    })
-    .join("");
+  `;
+  bindFaviconErrors(row);
 
-  bindFaviconErrors(articleListEl);
-  if (isCardView) {
-    articleListEl.querySelectorAll(".article-row").forEach((row) => {
-      if (row.querySelector(".article-image.pending")) queueImageFetch(row.dataset.link);
-    });
-  }
-
-  // Bind article events
-  articleListEl.querySelectorAll(".article-row").forEach((row) => {
-    row.addEventListener("click", (e) => {
-      if (e.target.classList.contains("share-btn")) {
-        handleShare(e.target, row.dataset.link, row.querySelector(".article-title").textContent);
-        return;
-      }
-      if (e.target.classList.contains("bookmark-btn")) {
-        toggleBookmark(row.dataset.link, e.target);
-        return;
-      }
-      openOriginal(row, true);
-    });
-    row.addEventListener("auxclick", (e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        openOriginal(row, false);
-      }
-    });
+  row.addEventListener("click", (e) => {
+    if (e.target.classList.contains("share-btn")) {
+      handleShare(e.target, row.dataset.link, row.querySelector(".article-title").textContent);
+      return;
+    }
+    if (e.target.classList.contains("bookmark-btn")) {
+      toggleBookmark(row.dataset.link, e.target);
+      return;
+    }
+    // The title is a real link (for "copy link address", keyboard focus, etc.), but
+    // opening goes through openOriginal so the article is also marked read.
+    e.preventDefault();
+    openOriginal(row, !(e.metaKey || e.ctrlKey)); // Cmd/Ctrl+click opens in the background
   });
+  row.addEventListener("auxclick", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      openOriginal(row, false);
+    }
+  });
+  return row;
+}
 
-  // Mark as read on scroll (IntersectionObserver)
-  setupScrollReadObserver();
+// Refresh the parts of an existing row that can change between renders
+function updateArticleRow(row, a) {
+  row.classList.toggle("read", readArticles.has(a.link));
+  row.dataset.feedIndex = String(a._feedIndex);
+  const timeEl = row.querySelector(".article-time");
+  if (timeEl) timeEl.textContent = relativeTime(a.pubDate);
+  const bm = row.querySelector(".bookmark-btn");
+  if (bm) {
+    const on = bookmarkedArticles.has(a.link);
+    bm.classList.toggle("bookmarked", on);
+    bm.textContent = on ? "★" : "☆";
+  }
+  // Image may have been learned since (feed refresh or background prefetch)
+  if (isCardView && !row.querySelector(".article-image img")) {
+    const image = getArticleImage(a);
+    if (image) {
+      const slot = row.querySelector(".article-image") || row.insertBefore(document.createElement("div"), row.firstChild);
+      slot.className = "article-image";
+      slot.innerHTML = `<img src="${escapeHtml(image)}" loading="lazy" alt="">`;
+      bindFaviconErrors(slot);
+    }
+  }
 }
 
 let scrollReadObserver = null;
@@ -690,15 +852,30 @@ function setupScrollReadObserver() {
   }
   if (!markReadOnScroll) return;
 
+  // Rows awaiting their first notification. An observer's initial callback only reports
+  // where a row currently is; it never means the user scrolled past it, so it must not
+  // mark anything read. Only later, scroll-driven notifications may.
+  const firstNotification = new Set();
+
   scrollReadObserver = new IntersectionObserver(
     (entries) => {
       let changed = false;
       entries.forEach((entry) => {
-        // Mark as read when the row scrolls out above the viewport
-        if (entry.isIntersecting) return;
-        if (!entry.rootBounds) return;
-        if (entry.boundingClientRect.bottom >= entry.rootBounds.top) return;
         const row = entry.target;
+        if (!entry.rootBounds) return;
+        const above = !entry.isIntersecting && entry.boundingClientRect.bottom < entry.rootBounds.top;
+        const initial = firstNotification.delete(row);
+
+        // Record where the row is now (overwrite, don't accumulate)
+        delete row.dataset.seen;
+        delete row.dataset.below;
+        if (entry.isIntersecting) row.dataset.seen = "1";
+        else if (!above) row.dataset.below = "1";
+
+        if (initial || !above) return;
+        // Rows can also move above the viewport without any scrolling (window resize,
+        // card reflow, font change, images appearing). Only count real scrolling.
+        if (performance.now() - lastUserScrollAt > USER_SCROLL_WINDOW_MS) return;
         const link = row.dataset.link;
         if (link && !readArticles.has(link)) {
           readArticles.add(link);
@@ -715,6 +892,7 @@ function setupScrollReadObserver() {
   );
 
   articleListEl.querySelectorAll(".article-row:not(.read)").forEach((row) => {
+    firstNotification.add(row);
     scrollReadObserver.observe(row);
   });
 }
@@ -760,8 +938,9 @@ function getFilteredArticles() {
   // Sort by date (newest first)
   articles.sort((a, b) => articleSortTime(b) - articleSortTime(a));
 
-  // Hide read articles
-  if (hideReadArticles && !tempShowRead) {
+  // Hide read articles (not in the bookmark view: opening a bookmark marks it read, and
+  // it must stay listed)
+  if (hideReadArticles && !tempShowRead && selection.type !== "bookmark") {
     articles = articles.filter((a) => !readArticles.has(a.link));
   }
 
@@ -837,18 +1016,25 @@ async function addFolder() {
   renderFeedList();
 }
 
+let addingFeed = false;
+
 async function addFeed() {
+  // The Enter key calls this directly, so the disabled button alone doesn't stop repeats
+  if (addingFeed) return;
   const url = feedUrlInput.value.trim();
   if (!url) {
     showModalError(t("enterUrl"));
     return;
   }
+  if (feeds.some((f) => f.url === url)) {
+    showModalError(t("feedExists"));
+    return;
+  }
 
+  addingFeed = true;
+  const btn = document.getElementById("btn-modal-add");
   try {
     showModalError("");
-    modalError.classList.add("hidden");
-
-    const btn = document.getElementById("btn-modal-add");
     btn.textContent = t("loading");
     btn.disabled = true;
 
@@ -869,12 +1055,10 @@ async function addFeed() {
     closeModal();
     renderFeedList();
     renderArticles();
-
-    btn.textContent = t("add");
-    btn.disabled = false;
   } catch (err) {
     showModalError(t("fetchError") + err.message);
-    const btn = document.getElementById("btn-modal-add");
+  } finally {
+    addingFeed = false;
     btn.textContent = t("add");
     btn.disabled = false;
   }
@@ -885,9 +1069,12 @@ function mergeItems(existingItems, newItems) {
   return mergeFeedItems(
     existingItems,
     newItems,
-    (link) => !readArticles.has(link) || bookmarkedArticles.has(link)
+    (link) => readArticles.has(link),
+    (link) => bookmarkedArticles.has(link)
   );
 }
+
+const REFRESH_CONCURRENCY = 4;
 
 async function refreshAll() {
   if (refreshing) return;
@@ -896,35 +1083,77 @@ async function refreshAll() {
   btn.textContent = "⏳";
   btn.disabled = true;
 
+  // Saves are coalesced: while one write is in flight, any number of finished feeds share
+  // the next one. A failed write (e.g. storage quota) is logged and must not stop the
+  // refresh; the data is still in memory and the next save retries it.
+  let dirty = false;
+  let saving = Promise.resolve();
+  const saveSoon = () => {
+    dirty = true;
+    saving = saving
+      .then(() => {
+        if (!dirty) return;
+        dirty = false;
+        return saveFeeds();
+      })
+      .catch((e) => console.warn("Failed to save feeds", e));
+    return saving;
+  };
+
   try {
-    for (let i = 0; i < feeds.length; i++) {
-      if (!feeds[i]) break; // feeds may have been removed meanwhile
-      try {
-        const result = await fetchFeed(feeds[i].url);
-        feeds[i].items = mergeItems(feeds[i].items, result.items);
-        feeds[i].lastUpdated = Date.now();
-        feeds[i].error = null;
-        if (!feeds[i].title || feeds[i].title === feeds[i].url) {
-          feeds[i].title = result.title || feeds[i].url;
+    // Hold on to the feed objects, not their indexes: the user can delete or add feeds
+    // while a fetch is in flight, which shifts every index after it.
+    const queue = [...feeds];
+    const worker = async () => {
+      while (queue.length > 0) {
+        const feed = queue.shift();
+        if (!feeds.includes(feed)) continue; // deleted meanwhile
+        try {
+          const result = await fetchFeed(feed.url);
+          if (!feeds.includes(feed)) continue; // deleted during the fetch
+          feed.items = mergeItems(feed.items, result.items);
+          feed.lastUpdated = Date.now();
+          feed.error = null;
+          if (!feed.title || feed.title === feed.url) {
+            feed.title = result.title || feed.url;
+          }
+          if (result.description) {
+            feed.description = result.description;
+          }
+        } catch (e) {
+          if (!feeds.includes(feed)) continue;
+          feed.error = e.message || String(e);
+          console.warn(`Failed to refresh: ${feed.url}`, e);
         }
-        if (result.description) {
-          feeds[i].description = result.description;
-        }
-      } catch (e) {
-        feeds[i].error = e.message || String(e);
-        console.warn(`Failed to refresh: ${feeds[i].url}`, e);
+        // Update UI and save after each feed so articles appear incrementally
+        renderFeedList();
+        renderArticles();
+        saveSoon();
       }
-      // Update UI and save after each feed so articles appear incrementally
-      await saveFeeds();
-      renderFeedList();
-      renderArticles();
+    };
+    // Several feeds at a time, so one slow or dead server doesn't hold up the rest
+    await Promise.all(Array.from({ length: REFRESH_CONCURRENCY }, worker));
+    await saving;
+    try {
+      await saveReadArticles(); // prunes stale read entries
+    } catch (e) {
+      console.warn("Failed to save read state", e);
     }
-    await saveReadArticles(); // prunes stale read entries
   } finally {
     btn.textContent = "⟳";
     btn.disabled = false;
     refreshing = false;
   }
+}
+
+// True when any feed hasn't been updated within the refresh interval, or when there is
+// nothing unread to show (a refresh is the only way new articles can appear).
+function isStale() {
+  if (feeds.length === 0) return false;
+  if (getTotalUnread() === 0) return true;
+  const intervalMs = (autoRefreshMinutes > 0 ? autoRefreshMinutes : 5) * 60 * 1000;
+  const oldest = Math.min(...feeds.map((f) => f.lastUpdated || 0));
+  return Date.now() - oldest > intervalMs;
 }
 
 function startAutoRefresh() {
@@ -938,133 +1167,25 @@ function startAutoRefresh() {
 }
 
 async function fetchFeed(url) {
-  const resp = await fetch(url);
+  // "no-cache" forces revalidation with the server; the default cache mode lets Chrome
+  // serve a stale copy for feeds with long max-age or heuristic freshness, so new
+  // articles could be missing for a long time. The timeout keeps a hung request from
+  // leaving `refreshing` stuck and blocking every later refresh.
+  const resp = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(20000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const text = await resp.text();
+  const text = decodeFeedBytes(await resp.arrayBuffer(), resp.headers.get("content-type"));
 
-  const parser = new DOMParser();
-  const xml = parser.parseFromString(text, "text/xml");
-
-  const parseError = xml.querySelector("parsererror");
-  if (parseError) throw new Error(t("xmlParseError"));
-
-  const result = { title: "", description: "", siteUrl: "", items: [] };
-
-  // RSS 2.0
-  const channel = xml.querySelector("channel");
-  if (channel) {
-    result.title = channel.querySelector(":scope > title")?.textContent || "";
-    result.description = channel.querySelector(":scope > description")?.textContent || "";
-    result.siteUrl = channel.querySelector(":scope > link")?.textContent || "";
-
-    xml.querySelectorAll("item").forEach((item) => {
-      const description = item.querySelector("description")?.textContent || "";
-      const encoded = item.getElementsByTagNameNS("http://purl.org/rss/1.0/modules/content/", "encoded")[0]?.textContent || "";
-      result.items.push({
-        title: item.querySelector("title")?.textContent || "",
-        link: item.querySelector("link")?.textContent || "",
-        description,
-        pubDate: extractItemDate(item, ["pubDate", "pubdate", "date"]),
-        image: extractItemImage(item, [encoded, description]),
-      });
-    });
-    return result;
+  try {
+    // resp.url is the final URL after redirects: the base for relative article links
+    return parseFeedXml(text, resp.url || url);
+  } catch (e) {
+    if (e.code === "xml") throw new Error(t("xmlParseError"));
+    if (e.code === "format") throw new Error(t("unsupportedFormat"));
+    throw e;
   }
-
-  // Atom
-  const atomFeed = xml.querySelector("feed");
-  if (atomFeed) {
-    result.title = atomFeed.querySelector(":scope > title")?.textContent || "";
-    result.description = atomFeed.querySelector(":scope > subtitle")?.textContent || "";
-    const siteLink = atomFeed.querySelector(':scope > link[rel="alternate"]');
-    result.siteUrl = siteLink?.getAttribute("href") || "";
-
-    xml.querySelectorAll("entry").forEach((entry) => {
-      const link =
-        entry.querySelector('link[rel="alternate"]')?.getAttribute("href") ||
-        entry.querySelector("link")?.getAttribute("href") ||
-        "";
-      const summary = entry.querySelector("summary")?.textContent || "";
-      const content = entry.querySelector("content")?.textContent || "";
-      result.items.push({
-        title: entry.querySelector("title")?.textContent || "",
-        link,
-        description: summary || content,
-        pubDate: extractItemDate(entry, ["published", "updated", "issued", "modified"]),
-        image: extractItemImage(entry, [content, summary]),
-      });
-    });
-    return result;
-  }
-
-  throw new Error(t("unsupportedFormat"));
 }
 
-// ===== Date helpers =====
-// Get the first non-empty date string from an item, checking common tag names
-// (pubDate / dc:date / published / updated / date, including namespaced ones)
-function extractItemDate(el, tagNames) {
-  for (const name of tagNames) {
-    const nodes = el.getElementsByTagName(name);
-    for (const n of nodes) {
-      const v = (n.textContent || "").trim();
-      if (v) return v;
-    }
-  }
-  // Namespaced fallbacks (dc:date etc.)
-  const DC = "http://purl.org/dc/elements/1.1/";
-  for (const ns of [DC]) {
-    const nodes = el.getElementsByTagNameNS(ns, "date");
-    for (const n of nodes) {
-      const v = (n.textContent || "").trim();
-      if (v) return v;
-    }
-  }
-  return "";
-}
-
-// Find a representative image for an item: enclosure / media:thumbnail / media:content,
-// else the first <img> in the HTML body. Returns "" if none.
-function isTinyImage(img, src) {
-  if (/favicon|\/s2\/favicons|st-hatena\.com\/64|\.gif(\?|$)/i.test(src)) return true;
-  const w = parseInt(img.getAttribute("width"), 10);
-  const h = parseInt(img.getAttribute("height"), 10);
-  return (!isNaN(w) && w <= 64) || (!isNaN(h) && h <= 64);
-}
-
-function extractItemImage(el, htmlCandidates) {
-  const HATENA = "http://www.hatena.ne.jp/info/xmlns#";
-  for (const n of el.getElementsByTagNameNS(HATENA, "imageurl")) {
-    const url = (n.textContent || "").trim();
-    if (/^https?:\/\//i.test(url)) return url;
-  }
-  const MRSS = "http://search.yahoo.com/mrss/";
-  for (const enc of el.getElementsByTagName("enclosure")) {
-    const type = enc.getAttribute("type") || "";
-    const url = enc.getAttribute("url") || "";
-    if (url && (type.startsWith("image/") || /\.(jpe?g|png|gif|webp|avif)(\?|$)/i.test(url))) return url;
-  }
-  for (const tag of ["thumbnail", "content"]) {
-    for (const m of el.getElementsByTagNameNS(MRSS, tag)) {
-      const url = m.getAttribute("url") || "";
-      const type = m.getAttribute("type") || "";
-      const medium = m.getAttribute("medium") || "";
-      if (url && (tag === "thumbnail" || medium === "image" || type.startsWith("image/") || /\.(jpe?g|png|gif|webp|avif)(\?|$)/i.test(url))) return url;
-    }
-  }
-  for (const html of htmlCandidates) {
-    if (!html || !html.includes("<")) continue;
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    for (const img of doc.querySelectorAll("img[src]")) {
-      const src = img.getAttribute("src") || "";
-      if (!/^https?:\/\//i.test(src)) continue;
-      if (isTinyImage(img, src)) continue; // skip favicons / tracking pixels
-      return src;
-    }
-  }
-  return "";
-}
-
+// ===== Article images =====
 // Image for an article. Returns a URL, "" when known to have none, or null when
 // not known yet (the article page must be fetched for og:image).
 // Order: value stored at fetch time -> <img> in description -> page cache.
@@ -1188,74 +1309,6 @@ async function saveImageCache() {
   await chrome.storage.local.set({ imageCache });
 }
 
-// Parse a feed date string into a millisecond timestamp. Returns null if unparseable.
-function parseFeedDate(str) {
-  if (!str) return null;
-  let s = String(str).trim();
-  if (!s) return null;
-
-  // Normalize common non-standard timezone abbreviations
-  s = s.replace(/\b(JST)\b/i, "+0900").replace(/\bUT\b/, "UTC");
-
-  let t = Date.parse(s);
-  if (!isNaN(t)) return t;
-
-  // YYYY-MM-DD[ T]hh:mm[:ss][.sss][Z|+hh:mm|+hhmm]  (also with "/" separators)
-  const m = s.match(
-    /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i
-  );
-  if (m) {
-    const [, y, mo, d, h = "0", mi = "0", se = "0", tz] = m;
-    if (tz) {
-      const tzNorm = tz.toUpperCase() === "Z" ? "Z" : tz.replace(/^([+-]\d{2})(\d{2})$/, "$1:$2");
-      t = Date.parse(
-        `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}T${h.padStart(2, "0")}:${mi}:${se}${tzNorm}`
-      );
-    } else {
-      t = new Date(+y, +mo - 1, +d, +h, +mi, +se).getTime();
-    }
-    if (!isNaN(t)) return t;
-  }
-
-  // Last resort: strip day-of-week / trailing text and retry
-  const stripped = s.replace(/^[A-Za-z]{3,},\s*/, "").replace(/\s*\(.*\)$/, "");
-  t = Date.parse(stripped);
-  return isNaN(t) ? null : t;
-}
-
-// Sort key: parsed publication time, else the time we first saw the item
-function articleSortTime(item) {
-  if (typeof item.timestamp === "number") return item.timestamp;
-  const t = parseFeedDate(item.pubDate);
-  if (t !== null) return t;
-  return item.firstSeen || 0;
-}
-
-// Merge new items with existing items: keep items missing from the new fetch when
-// shouldKeep(link) says so (unread / bookmarked), and carry over firstSeen so undated
-// items keep a stable position.
-function mergeFeedItems(existingItems, newItems, shouldKeep) {
-  const now = Date.now();
-  const existingByLink = new Map();
-  (existingItems || []).forEach((it) => {
-    if (it.link) existingByLink.set(it.link, it);
-  });
-  const merged = newItems.map((it) => {
-    const prev = existingByLink.get(it.link);
-    const timestamp = parseFeedDate(it.pubDate);
-    return {
-      ...it,
-      timestamp: timestamp === null ? null : timestamp,
-      firstSeen: prev?.firstSeen || now,
-    };
-  });
-  const newLinks = new Set(newItems.map((it) => it.link).filter(Boolean));
-  const kept = (existingItems || []).filter(
-    (it) => it.link && !newLinks.has(it.link) && shouldKeep(it.link)
-  );
-  return [...merged, ...kept];
-}
-
 // Drop read-marks for links no longer present in any feed, keeping the most recent
 // MAX_STALE_READ of them so re-published old items don't come back as unread.
 const MAX_STALE_READ = 2000;
@@ -1271,15 +1324,15 @@ function pruneReadArticles(readList, feedList) {
 // Mark as read and open the original article. active=true focuses the new tab.
 function openOriginal(row, active) {
   const link = row.dataset.link;
-  if (!link) return;
+  if (!link || !isHttpUrl(link)) return; // never open file:, chrome:, javascript: etc. from a feed
   readArticles.add(link);
   saveReadArticles();
   row.classList.add("read");
   renderFeedList(); // update unread counts
   if (typeof chrome !== "undefined" && chrome.tabs?.create) {
-    chrome.tabs.create({ url: link, active });
+    chrome.tabs.create({ url: link.trim(), active });
   } else {
-    window.open(link, "_blank");
+    window.open(link.trim(), "_blank");
   }
 }
 
@@ -1358,6 +1411,31 @@ function formatDate(dateStr) {
 
 function getUnreadCount(feed) {
   return (feed.items || []).filter((it) => !readArticles.has(it.link)).length;
+}
+
+// Bookmarked articles that still exist in some feed (what the bookmark view can show)
+function getBookmarkCount() {
+  const links = new Set();
+  feeds.forEach((f) =>
+    (f.items || []).forEach((it) => {
+      if (bookmarkedArticles.has(it.link)) links.add(it.link);
+    })
+  );
+  return links.size;
+}
+
+// Mark every unread article in the current view (selection + search) as read
+function markAllRead() {
+  const links = [...new Set(getFilteredArticles().map((a) => a.link))].filter(
+    (l) => l && !readArticles.has(l)
+  );
+  if (links.length === 0) return;
+  if (!confirm(t("markAllReadConfirm", { n: links.length }))) return;
+  links.forEach((l) => readArticles.add(l));
+  saveReadArticles();
+  setScrollTop(0);
+  renderFeedList();
+  renderArticles();
 }
 
 function getTotalUnread() {
@@ -1574,7 +1652,7 @@ function showSettingsMenu() {
     menu.appendChild(item);
   });
 
-  document.body.appendChild(menu);
+  showMenu(menu);
 }
 
 // ===== Dark Mode =====
@@ -1622,6 +1700,7 @@ function applyLanguage() {
   document.getElementById("btn-settings").title = t("settings");
   document.getElementById("btn-add-feed").textContent = t("addFeed");
   document.getElementById("search-input").placeholder = t("search");
+  document.getElementById("btn-mark-all-read").title = t("markAllRead");
   document.getElementById("btn-view-list").title = t("listView");
   document.getElementById("btn-view-card").title = t("cardView");
   // Feed modal
@@ -1735,7 +1814,9 @@ async function handleOpmlImport(e) {
           importedFolders++;
         }
 
-        const children = outline.querySelectorAll(":scope > outline");
+        // Folders here are one level deep, so feeds in nested folders go into the
+        // top-level one rather than being dropped.
+        const children = outline.querySelectorAll("outline");
         for (const child of children) {
           const childUrl = child.getAttribute("xmlUrl");
           if (childUrl && !existingUrls.has(childUrl)) {
@@ -1753,6 +1834,7 @@ async function handleOpmlImport(e) {
     renderArticles();
 
     alert(t("opmlImportDone", { feeds: importedFeeds, folders: importedFolders }));
+    if (importedFeeds > 0) refreshAll(); // imported feeds have no articles yet
   } catch (err) {
     alert(t("opmlImportError") + err.message);
   }

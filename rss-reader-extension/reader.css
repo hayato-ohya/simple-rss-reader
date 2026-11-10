@@ -129,6 +129,8 @@ html.dark #feed-list li .feed-error {
 /* Context menu for feed deletion */
 .feed-context-menu {
   position: fixed;
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
   background: #fff;
   border: 1px solid #ccc;
   border-radius: 4px;
@@ -400,6 +402,7 @@ html.dark #feed-list li .feed-error {
 
 .article-title {
   flex: 1;
+  text-decoration: none;
   font-size: 13px;
   color: #333;
   overflow: hidden;
@@ -558,6 +561,9 @@ html.dark .bookmark-btn.bookmarked {
   align-items: center;
   justify-content: center;
   min-height: 100%;
+  width: 100%;
+  flex-basis: 100%;
+  text-align: center;
   color: #999;
   font-size: 14px;
   gap: 12px;

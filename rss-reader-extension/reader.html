@@ -33,7 +33,8 @@
             <input type="text" id="search-input" placeholder="検索...">
             <span class="search-icon">🔍</span>
           </div>
-          <button id="btn-view-list" class="view-btn active" title="リスト表示">☰</button>
+          <button id="btn-mark-all-read" class="view-btn" title="すべて既読にする">✓</button>
+          <button id="btn-view-list"class="view-btn active" title="リスト表示">☰</button>
           <button id="btn-view-card" class="view-btn" title="カード表示">⊞</button>
         </div>
       </div>
@@ -86,6 +87,7 @@
   <!-- Hidden file input for OPML import -->
   <input type="file" id="opml-file-input" accept=".opml,.xml" style="display:none">
 
+  <script src="shared.js"></script>
   <script src="reader.js"></script>
 </body>
 </html>
