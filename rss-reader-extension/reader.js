@@ -19,6 +19,7 @@ const translations = {
     markAllRead: "すべて既読にする",
     markAllReadConfirm: "表示中の未読 ${n} 件をすべて既読にしますか？",
     feedExists: "このフィードは登録済みです",
+    invalidUrl: "URLが正しくありません",
     shareTwitter: "Twitterで共有",
     shareFacebook: "Facebookで共有",
     bookmark: "ブックマーク",
@@ -84,6 +85,7 @@ const translations = {
     markAllRead: "Mark all as read",
     markAllReadConfirm: "Mark the ${n} unread article(s) in this view as read?",
     feedExists: "This feed is already registered",
+    invalidUrl: "Invalid URL",
     shareTwitter: "Share on Twitter",
     shareFacebook: "Share on Facebook",
     bookmark: "Bookmark",
@@ -1021,12 +1023,21 @@ let addingFeed = false;
 async function addFeed() {
   // The Enter key calls this directly, so the disabled button alone doesn't stop repeats
   if (addingFeed) return;
-  const url = feedUrlInput.value.trim();
+  let url = feedUrlInput.value.trim();
   if (!url) {
     showModalError(t("enterUrl"));
     return;
   }
-  if (feeds.some((f) => f.url === url)) {
+  // "example.com/feed" would otherwise be fetched relative to the extension's own URL
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = "https://" + url;
+  try {
+    if (!/^https?:$/.test(new URL(url).protocol)) throw new Error("not http(s)");
+  } catch {
+    showModalError(t("invalidUrl"));
+    return;
+  }
+  const isRegistered = (u) => feeds.some((f) => feedUrlKey(f.url) === feedUrlKey(u));
+  if (isRegistered(url)) {
     showModalError(t("feedExists"));
     return;
   }
@@ -1038,7 +1049,16 @@ async function addFeed() {
     btn.textContent = t("loading");
     btn.disabled = true;
 
-    const result = await fetchFeed(url);
+    // url may be a site's page rather than its feed; resolveFeed finds the feed it links to
+    const resolved = await resolveFeed(url);
+    const result = resolved.result;
+    if (resolved.url !== url) {
+      url = resolved.url;
+      if (isRegistered(url)) {
+        showModalError(t("feedExists"));
+        return;
+      }
+    }
     const customName = feedNameInput.value.trim();
 
     feeds.push({
@@ -1171,17 +1191,66 @@ async function fetchFeed(url) {
   // serve a stale copy for feeds with long max-age or heuristic freshness, so new
   // articles could be missing for a long time. The timeout keeps a hung request from
   // leaving `refreshing` stuck and blocking every later refresh.
+  const { text, baseUrl } = await fetchText(url);
+  return parseFeed(text, baseUrl);
+}
+
+async function fetchText(url) {
   const resp = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(20000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const text = decodeFeedBytes(await resp.arrayBuffer(), resp.headers.get("content-type"));
+  // resp.url is the final URL after redirects: the base for relative links
+  return { text, baseUrl: resp.url || url };
+}
 
+function parseFeed(text, baseUrl) {
   try {
-    // resp.url is the final URL after redirects: the base for relative article links
-    return parseFeedXml(text, resp.url || url);
+    return parseFeedXml(text, baseUrl);
   } catch (e) {
     if (e.code === "xml") throw new Error(t("xmlParseError"));
     if (e.code === "format") throw new Error(t("unsupportedFormat"));
     throw e;
+  }
+}
+
+// For adding a feed: fetch url, and if it turns out to be a web page rather than a feed,
+// follow the feed it advertises (<link rel="alternate" type="application/rss+xml" ...>).
+// Returns { url, result } where url is the feed's actual URL.
+async function resolveFeed(url) {
+  const { text, baseUrl } = await fetchText(url);
+  try {
+    return { url, result: parseFeed(text, baseUrl) };
+  } catch (e) {
+    const found = discoverFeedUrl(text, baseUrl);
+    if (!found || feedUrlKey(found) === feedUrlKey(url)) throw e;
+    return { url: found, result: await fetchFeed(found) };
+  }
+}
+
+function discoverFeedUrl(html, baseUrl) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const link of doc.querySelectorAll("link[href]")) {
+    const rel = (link.getAttribute("rel") || "").toLowerCase().split(/\s+/);
+    const type = (link.getAttribute("type") || "").toLowerCase();
+    if (!rel.includes("alternate") || !/(rss|atom)\+xml/.test(type)) continue;
+    try {
+      const abs = new URL(link.getAttribute("href").trim(), baseUrl).href;
+      if (isHttpUrl(abs)) return abs;
+    } catch {
+      // malformed href: try the next one
+    }
+  }
+  return "";
+}
+
+// Key for spotting the same feed written differently: ignores http/https, host case,
+// trailing slashes and #fragment.
+function feedUrlKey(url) {
+  try {
+    const u = new URL(url);
+    return u.host + u.pathname.replace(/\/+$/, "") + u.search;
+  } catch {
+    return url;
   }
 }
 
@@ -1788,16 +1857,16 @@ async function handleOpmlImport(e) {
 
     let importedFeeds = 0;
     let importedFolders = 0;
-    const existingUrls = new Set(feeds.map((f) => f.url));
+    const existingUrls = new Set(feeds.map((f) => feedUrlKey(f.url)));
 
     const topOutlines = body.querySelectorAll(":scope > outline");
     for (const outline of topOutlines) {
       const xmlUrl = outline.getAttribute("xmlUrl");
       if (xmlUrl) {
         // Top-level feed
-        if (!existingUrls.has(xmlUrl)) {
+        if (!existingUrls.has(feedUrlKey(xmlUrl))) {
           feeds.push(outlineToFeed(outline, null));
-          existingUrls.add(xmlUrl);
+          existingUrls.add(feedUrlKey(xmlUrl));
           importedFeeds++;
         }
       } else {
@@ -1819,9 +1888,9 @@ async function handleOpmlImport(e) {
         const children = outline.querySelectorAll("outline");
         for (const child of children) {
           const childUrl = child.getAttribute("xmlUrl");
-          if (childUrl && !existingUrls.has(childUrl)) {
+          if (childUrl && !existingUrls.has(feedUrlKey(childUrl))) {
             feeds.push(outlineToFeed(child, folder.id));
-            existingUrls.add(childUrl);
+            existingUrls.add(feedUrlKey(childUrl));
             importedFeeds++;
           }
         }

@@ -145,6 +145,24 @@ function atomText(el) {
   return collapseSpaces((el.getAttribute("type") || "").toLowerCase() === "html" ? htmlToText(s) : s);
 }
 
+// The article URL of an Atom entry: its "alternate" link (a link without rel is one too),
+// preferring the HTML one. Other rels (enclosure, replies, self, edit, ...) point at audio
+// files, comment feeds and the like, so they are never used.
+function atomEntryLink(entry) {
+  const links = [...entry.children].filter((el) => el.localName === "link");
+  const alternates = links.filter(
+    (l) => l.getAttribute("href") && (l.getAttribute("rel") || "alternate").toLowerCase() === "alternate"
+  );
+  const pick =
+    alternates.find((l) => /html/i.test(l.getAttribute("type") || "")) ||
+    alternates.find((l) => !l.getAttribute("type")) ||
+    alternates[0];
+  if (pick) return pick.getAttribute("href");
+  // Old or sloppy feeds write the URL as the element's text
+  const textLink = links.find((l) => !l.getAttribute("href") && (l.textContent || "").trim());
+  return textLink ? textLink.textContent : "";
+}
+
 function isHttpUrl(s) {
   return /^\s*https?:\/\//i.test(s || "");
 }
@@ -276,11 +294,7 @@ function parseFeedXml(text, baseUrl) {
     result.siteUrl = siteLink?.getAttribute("href") || "";
 
     xml.querySelectorAll("entry").forEach((entry) => {
-      const rawLink =
-        entry.querySelector('link[rel="alternate"]')?.getAttribute("href") ||
-        entry.querySelector("link")?.getAttribute("href") ||
-        entry.querySelector("link")?.textContent ||
-        "";
+      const rawLink = atomEntryLink(entry);
       const id = entry.querySelector(":scope > id")?.textContent || "";
       const summary = entry.querySelector("summary")?.textContent || "";
       const content = entry.querySelector("content")?.textContent || "";
