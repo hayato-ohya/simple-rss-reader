@@ -26,6 +26,12 @@
 - OPML ファイルのインポート・エクスポート
 - 読み込みエラー時の⚠アイコン表示
 
+#### フィード統計
+- サイドバーの「📊 フィード統計」の数字が登録フィード数
+- 開くと、登録フィード数（フォルダ内 / フォルダなしの内訳）、30日以内に更新があったフィード数、半年以上更新がないフィード数、全体の更新ペースを表示
+- フィードごとの最終更新、更新頻度（週 / 月 / 年あたりの件数）、平均更新間隔、直近30日の記事数、未読数を一覧表示（見出しクリックで並べ替え、半年以上更新のないフィードは薄く表示）
+- 更新頻度は各フィードに現在含まれている記事の日付から推定（古い記事が混ざっていても影響しないよう、最も古い2割は除外）
+
 #### 記事閲覧
 - 2ペインレイアウト（サイドバー / 記事一覧）
 - リスト表示・カード表示の切り替え
@@ -79,6 +85,12 @@ A simple yet feature-rich RSS reader extension for Chromium-based browsers.
 - Create, rename, and delete folders
 - Import and export OPML files
 - ⚠ error indicator for feeds that fail to load
+
+#### Feed Stats
+- The number next to "📊 Feed Stats" in the sidebar is your feed count
+- Open it to see the feed count (in folders / without), how many feeds updated in the last 30 days, how many have not updated for 6+ months, and the total update pace
+- A table of each feed's last update, update frequency (per week / month / year), average interval, articles in the last 30 days and unread count (click a heading to sort; feeds inactive for 6+ months are dimmed)
+- Frequency is estimated from the dates of the articles each feed currently contains (the oldest 20% are left out so a few old articles mixed in don't skew it)
 
 #### Article Reading
 - 2-pane layout (sidebar / article list)

@@ -152,6 +152,7 @@ async function runFeedUpdate() {
             (link) => readSet.has(link),
             (link) => bookmarkSet.has(link)
           );
+          feed.itemCount = r.items.length; // the current feed's items come first in feed.items
           feed.lastUpdated = Date.now();
           delete feed.error;
         }

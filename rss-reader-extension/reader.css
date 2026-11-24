@@ -355,8 +355,156 @@ html.dark #feed-list li .feed-error {
   height: calc(100vh - 44px);
 }
 
-#article-list:has(.empty-state)::after {
+#article-list:has(.empty-state)::after,
+#article-list:has(.stats)::after {
   display: none;
+}
+
+/* ===== Feed Stats ===== */
+.stats {
+  padding: 16px;
+  max-width: 1100px;
+}
+
+.stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.stat-card {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #333;
+}
+
+.stat-label {
+  margin-top: 2px;
+  font-size: 13px;
+  color: #666;
+}
+
+.stat-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #999;
+}
+
+.stats-note {
+  margin: 12px 0 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #999;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid #ddd;
+  font-size: 13px;
+}
+
+.stats-table th,
+.stats-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.stats-table th {
+  position: sticky;
+  top: 0;
+  background: #f0f0f0;
+  font-weight: 600;
+  font-size: 12px;
+  color: #666;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stats-table th.sorted {
+  color: #333;
+}
+
+.stats-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-table tbody tr {
+  cursor: pointer;
+}
+
+.stats-table tbody tr:hover {
+  background: #f3f6fa;
+}
+
+.stats-table tr.dormant td {
+  color: #aaa;
+}
+
+.stats-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+}
+
+.stats-name span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats-name .feed-icon {
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.stats-name .feed-error {
+  color: #e6a700;
+  cursor: help;
+}
+
+html.dark .stat-card,
+html.dark .stats-table {
+  background: #252525;
+  border-color: #444;
+}
+
+html.dark .stat-value,
+html.dark .stats-table th.sorted {
+  color: #ddd;
+}
+
+html.dark .stat-label,
+html.dark .stats-table th {
+  color: #aaa;
+}
+
+html.dark .stats-table th {
+  background: #2d2d2d;
+}
+
+html.dark .stats-table td {
+  border-bottom-color: #333;
+  color: #ddd;
+}
+
+html.dark .stats-table tbody tr:hover {
+  background: #2a2f3a;
+}
+
+html.dark .stats-table tr.dormant td {
+  color: #777;
 }
 
 .article-row {

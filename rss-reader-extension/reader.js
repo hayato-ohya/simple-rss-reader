@@ -65,6 +65,26 @@ const translations = {
     minutes: "${n}分",
     language: "言語 / Language",
     defaultFolder: "フォルダ",
+    feedStats: "フィード統計",
+    statFeeds: "登録フィード数",
+    statFeedsSub: "フォルダ内 ${inFolder} / フォルダなし ${root}",
+    statActive30: "30日以内に更新あり",
+    statDormant: "半年以上更新なし",
+    statTotalRate: "全体の更新ペース",
+    statErrors: "取得エラー ${n} 件",
+    statsNote: "更新頻度は各フィードに現在含まれている記事の日付から推定しています（フィードに載る件数はサイトにより異なります。古い記事が混ざっていても影響しないよう、最も古い2割は除いて計算）。「直近30日」の「+」は、フィード内の記事がすべて30日以内のもので、実際にはそれ以上更新されている可能性があることを示します。見出しをクリックすると並べ替え、行をクリックするとそのフィードを表示します。",
+    colFeed: "フィード",
+    colLast: "最終更新",
+    colRate: "更新頻度",
+    colInterval: "平均間隔",
+    colLast30: "直近30日",
+    colUnread: "未読",
+    perWeek: "週 ${n} 件",
+    perMonth: "月 ${n} 件",
+    perYear: "年 ${n} 件",
+    intervalDays: "${n} 日",
+    intervalHours: "${n} 時間",
+    noDates: "日付なし",
   },
   en: {
     appTitle: "RSS Reader",
@@ -131,6 +151,26 @@ const translations = {
     minutes: "${n}min",
     language: "Language / 言語",
     defaultFolder: "Folder",
+    feedStats: "Feed Stats",
+    statFeeds: "Feeds",
+    statFeedsSub: "${inFolder} in folders / ${root} without",
+    statActive30: "Updated in last 30 days",
+    statDormant: "No updates for 6+ months",
+    statTotalRate: "Total update pace",
+    statErrors: "${n} failed to load",
+    statsNote: "Update frequency is estimated from the dates of the articles each feed currently contains (how many a feed carries varies by site; the oldest 20% are left out so that a few old articles mixed in don't skew it). A \"+\" in Last 30 days means every article in the feed is from the last 30 days, so the feed may update more than shown. Click a heading to sort, or a row to open the feed.",
+    colFeed: "Feed",
+    colLast: "Last update",
+    colRate: "Frequency",
+    colInterval: "Avg. interval",
+    colLast30: "Last 30 days",
+    colUnread: "Unread",
+    perWeek: "${n}/week",
+    perMonth: "${n}/month",
+    perYear: "${n}/year",
+    intervalDays: "${n} days",
+    intervalHours: "${n} hours",
+    noDates: "No dates",
   },
 };
 
@@ -387,6 +427,17 @@ function renderFeedList() {
   `;
   bookmarkLi.addEventListener("click", () => selectAndRender({ type: "bookmark" }));
   feedListEl.appendChild(bookmarkLi);
+
+  // "Feed Stats" item: its count is the number of registered feeds
+  const statsLi = document.createElement("li");
+  statsLi.className = selection.type === "stats" ? "active" : "";
+  statsLi.innerHTML = `
+    <span class="feed-icon" style="font-size:14px;">📊</span>
+    <span class="feed-name">${t("feedStats")}</span>
+    <span class="feed-count">${feeds.length}</span>
+  `;
+  statsLi.addEventListener("click", () => selectAndRender({ type: "stats" }));
+  feedListEl.appendChild(statsLi);
 
   // Feeds not in any folder
   const unfoldered = feeds
@@ -656,6 +707,12 @@ function showFolderContextMenu(e, folder) {
 
 // ===== Article List Rendering =====
 function renderArticles() {
+  const isStats = selection.type === "stats";
+  document.getElementById("content-actions").style.display = isStats ? "none" : "";
+  if (isStats) {
+    renderFeedStats();
+    return;
+  }
   const articles = getFilteredArticles();
 
   // Update header title
@@ -1067,6 +1124,7 @@ async function addFeed() {
       description: result.description || "",
       siteUrl: result.siteUrl || "",
       items: mergeItems([], result.items || []),
+      itemCount: (result.items || []).length,
       folderId: feedFolderSelect.value || null,
       lastUpdated: Date.now(),
     });
@@ -1082,6 +1140,156 @@ async function addFeed() {
     btn.textContent = t("add");
     btn.disabled = false;
   }
+}
+
+// ===== Feed statistics (update frequency) =====
+// Estimated from the dates of the articles the feed currently contains: feed.items
+// starts with them (mergeFeedItems puts them first) and feed.itemCount says how many.
+// Feeds saved before itemCount existed fall back to all stored items until refreshed.
+// Updates per week = n / (now - oldest of the n): counting up to now, not only up to the
+// newest article, makes a feed that has gone quiet come out as infrequent.
+let statsSort = { key: "rate", dir: -1 };
+const DAY_MS = 86400000;
+
+function feedStats(feed, now) {
+  const items = feed.itemCount ? (feed.items || []).slice(0, feed.itemCount) : feed.items || [];
+  const times = items
+    .map((it) => (typeof it.timestamp === "number" ? it.timestamp : parseFeedDate(it.pubDate)))
+    .filter((ts) => ts !== null && ts <= now + DAY_MS)
+    .sort((a, b) => b - a);
+  const s = { feed, items: items.length, dated: times.length, last: null, rate: null, interval: null, last30: 0, capped: false };
+  if (!times.length) return s;
+  s.last = times[0];
+  // Some feeds keep a few old articles alongside the new ones (pinned or evergreen
+  // posts); one of those would make a busy feed look rare. Leave out the oldest 20%.
+  const used = times.slice(0, Math.ceil(times.length * 0.8));
+  const oldest = used[used.length - 1];
+  s.rate = used.length / (Math.max(now - oldest, DAY_MS) / (7 * DAY_MS));
+  if (used.length > 1) s.interval = (used[0] - oldest) / (used.length - 1) / DAY_MS;
+  s.last30 = times.filter((ts) => now - ts <= 30 * DAY_MS).length;
+  s.capped = s.last30 === times.length && times.length === items.length && items.length > 1;
+  return s;
+}
+
+function formatRate(perWeek) {
+  if (perWeek == null) return "—";
+  const n = (x) => (x >= 10 ? Math.round(x) : Math.round(x * 10) / 10);
+  if (perWeek >= 1) return t("perWeek", { n: n(perWeek) });
+  if ((perWeek * 30) / 7 >= 1) return t("perMonth", { n: n((perWeek * 30) / 7) });
+  return t("perYear", { n: n((perWeek * 365) / 7) });
+}
+
+function formatInterval(days) {
+  if (days == null) return "—";
+  if (days < 1) return t("intervalHours", { n: Math.max(1, Math.round(days * 24)) });
+  return t("intervalDays", { n: days >= 10 ? Math.round(days) : Math.round(days * 10) / 10 });
+}
+
+function renderFeedStats() {
+  feedTitleEl.textContent = t("feedStats");
+  articleListEl.className = "";
+  if (scrollReadObserver) {
+    scrollReadObserver.disconnect();
+    scrollReadObserver = null;
+  }
+  if (feeds.length === 0) {
+    articleListEl.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <div>${t("noFeeds")}</div>
+        <div>${t("noFeedsHint")}</div>
+      </div>
+    `;
+    return;
+  }
+
+  const now = Date.now();
+  const rows = feeds.map((feed, index) => ({ ...feedStats(feed, now), index, unread: getUnreadCount(feed) }));
+  const inFolder = feeds.filter((f) => f.folderId).length;
+  const active30 = rows.filter((r) => r.last && now - r.last <= 30 * DAY_MS).length;
+  const dormant = rows.filter((r) => r.last && now - r.last > 180 * DAY_MS).length;
+  const errors = feeds.filter((f) => f.error).length;
+  const totalRate = rows.reduce((n, r) => n + (r.rate || 0), 0);
+
+  const keyOf = {
+    name: (r) => (r.feed.title || r.feed.url).toLowerCase(),
+    last: (r) => r.last ?? -Infinity,
+    rate: (r) => r.rate ?? -Infinity,
+    interval: (r) => r.interval ?? Infinity,
+    last30: (r) => (r.dated ? r.last30 : -1),
+    unread: (r) => r.unread,
+  };
+  const key = keyOf[statsSort.key];
+  rows.sort((a, b) => {
+    const x = key(a);
+    const y = key(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * statsSort.dir;
+  });
+
+  const card = (label, value, sub = "") =>
+    `<div class="stat-card"><div class="stat-value">${escapeHtml(value)}</div><div class="stat-label">${escapeHtml(label)}</div>${
+      sub ? `<div class="stat-sub">${escapeHtml(sub)}</div>` : ""
+    }</div>`;
+  const th = (k, label, cls = "") =>
+    `<th class="${cls}${statsSort.key === k ? " sorted" : ""}" data-key="${k}">${escapeHtml(label)}${
+      statsSort.key === k ? (statsSort.dir < 0 ? " ▼" : " ▲") : ""
+    }</th>`;
+  const ago = (ts) => relativeTime(new Date(ts).toISOString());
+
+  articleListEl.innerHTML = `
+    <div class="stats">
+      <div class="stat-cards">
+        ${card(t("statFeeds"), String(feeds.length), t("statFeedsSub", { inFolder, root: feeds.length - inFolder }))}
+        ${card(t("statActive30"), String(active30))}
+        ${card(t("statDormant"), String(dormant), errors ? t("statErrors", { n: errors }) : "")}
+        ${card(t("statTotalRate"), formatRate(totalRate))}
+      </div>
+      <div class="stats-note">${escapeHtml(t("statsNote"))}</div>
+      <table class="stats-table">
+        <thead><tr>
+          ${th("name", t("colFeed"))}
+          ${th("last", t("colLast"), "num")}
+          ${th("rate", t("colRate"), "num")}
+          ${th("interval", t("colInterval"), "num")}
+          ${th("last30", t("colLast30"), "num")}
+          ${th("unread", t("colUnread"), "num")}
+        </tr></thead>
+        <tbody>
+          ${rows
+            .map((r) => {
+              const f = r.feed;
+              const dormantRow = r.last && now - r.last > 180 * DAY_MS;
+              return `<tr data-index="${r.index}" class="${dormantRow ? "dormant" : ""}">
+                <td><div class="stats-name"><img class="feed-icon" src="${escapeHtml(getFaviconUrl(f))}" width="16" height="16"><span>${escapeHtml(
+                  f.title || f.url
+                )}</span>${f.error ? `<span class="feed-error" title="${escapeHtml(f.error)}">⚠</span>` : ""}</div></td>
+                <td class="num">${r.last ? escapeHtml(ago(r.last)) : r.items ? escapeHtml(t("noDates")) : "—"}</td>
+                <td class="num">${escapeHtml(formatRate(r.rate))}</td>
+                <td class="num">${escapeHtml(formatInterval(r.interval))}</td>
+                <td class="num">${r.dated ? r.last30 + (r.capped ? "+" : "") : "—"}</td>
+                <td class="num">${r.unread || ""}</td>
+              </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>`;
+  bindFaviconErrors(articleListEl);
+
+  articleListEl.querySelectorAll("th[data-key]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const k = el.dataset.key;
+      // Names sort A→Z first; numbers biggest first (interval: shortest first)
+      if (statsSort.key === k) statsSort.dir *= -1;
+      else statsSort = { key: k, dir: k === "name" || k === "interval" ? 1 : -1 };
+      renderFeedStats();
+    })
+  );
+  articleListEl.querySelectorAll("tbody tr").forEach((tr) => {
+    const idx = Number(tr.dataset.index);
+    tr.addEventListener("click", () => selectAndRender({ type: "feed", feedIndex: idx }));
+    tr.addEventListener("contextmenu", (e) => showFeedContextMenu(e, idx));
+  });
 }
 
 // Merge new items with existing unread items not present in the new fetch
@@ -1132,6 +1340,7 @@ async function refreshAll() {
           const result = await fetchFeed(feed.url);
           if (!feeds.includes(feed)) continue; // deleted during the fetch
           feed.items = mergeItems(feed.items, result.items);
+          feed.itemCount = result.items.length; // the current feed's items come first
           feed.lastUpdated = Date.now();
           feed.error = null;
           if (!feed.title || feed.title === feed.url) {
