@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "minimum_chrome_version": "116",
   "description": "シンプルなRSSリーダー Chrome拡張機能",
-  "permissions": ["storage", "unlimitedStorage", "alarms", "offscreen"],
+  "permissions": ["storage", "unlimitedStorage", "alarms", "offscreen", "favicon"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_icon": {

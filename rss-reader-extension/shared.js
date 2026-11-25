@@ -2,6 +2,36 @@
 // offscreen document. The DOM-based functions are only called where a DOM exists
 // (reader page / offscreen document).
 
+// ===== Reading responses =====
+// Read a response body, refusing anything over maxBytes (a feed is never that large; a
+// huge or endless response would otherwise be held in memory in full).
+const MAX_FEED_BYTES = 10 * 1024 * 1024;
+
+async function readBodyLimited(resp, maxBytes = MAX_FEED_BYTES) {
+  const declared = Number(resp.headers.get("content-length"));
+  if (declared > maxBytes) throw new Error("Feed too large");
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > maxBytes) {
+      reader.cancel().catch(() => {});
+      throw new Error("Feed too large");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.length;
+  }
+  return bytes.buffer;
+}
+
 // ===== Decoding =====
 // Decode a feed response. resp.text() always assumes UTF-8, which garbles Shift_JIS /
 // EUC-JP feeds. Order: BOM -> encoding in the XML declaration -> Content-Type charset
@@ -255,15 +285,20 @@ function parseFeedXml(text, baseUrl) {
   }
 
   const result = { title: "", description: "", siteUrl: "", items: [] };
+  // An article listed twice in one feed would be counted twice (unread counts, stats)
+  // while shown once; keep the first.
+  const seenLinks = new Set();
   const addItem = (item) => {
-    if (item.link) result.items.push(item);
+    if (!item.link || seenLinks.has(item.link)) return;
+    seenLinks.add(item.link);
+    result.items.push(item);
   };
 
   // RSS 2.0 / RSS 1.0 (RDF)
   const channel = xml.querySelector("channel");
   if (channel) {
     result.title = cleanRssTitle(rssChildText(channel, "title"));
-    result.description = rssChildText(channel, "description");
+    result.description = collapseSpaces(htmlToText(rssChildText(channel, "description")));
     result.siteUrl = rssChildText(channel, "link").trim();
 
     xml.querySelectorAll("item").forEach((item) => {
@@ -287,7 +322,7 @@ function parseFeedXml(text, baseUrl) {
   const atomFeed = xml.querySelector("feed");
   if (atomFeed) {
     result.title = atomText(atomFeed.querySelector(":scope > title"));
-    result.description = atomFeed.querySelector(":scope > subtitle")?.textContent || "";
+    result.description = atomText(atomFeed.querySelector(":scope > subtitle"));
     const siteLink =
       atomFeed.querySelector(':scope > link[rel="alternate"]') ||
       atomFeed.querySelector(":scope > link:not([rel])");

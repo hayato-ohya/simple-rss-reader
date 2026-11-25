@@ -36,6 +36,7 @@
 - 2ペインレイアウト（サイドバー / 記事一覧）
 - リスト表示・カード表示の切り替え
 - 記事の検索
+- ブラウザの戻る・進むで表示の切り替えをたどれる（スクロール位置も復元、再読み込みしても同じ画面）
 - クリックで元の記事を新しいタブで開く（中央クリックならバックグラウンドで開く）
 - SNS共有（X / Facebook）
 
@@ -96,6 +97,7 @@ A simple yet feature-rich RSS reader extension for Chromium-based browsers.
 - 2-pane layout (sidebar / article list)
 - Toggle between list view and card view
 - Article search
+- Browser back / forward move between views (scroll position restored; a reload stays on the same view)
 - Click to open the original article in a new tab (middle-click opens it in the background)
 - Social sharing (X / Facebook)
 

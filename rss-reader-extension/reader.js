@@ -41,6 +41,11 @@ const translations = {
     loading: "読み込み中...",
     fetchError: "フィードの取得に失敗しました: ",
     xmlParseError: "XMLの解析に失敗しました",
+    feedTooLarge: "フィードが大きすぎます（10MB超）",
+    feedNamePlaceholder: "フィード名",
+    deleteFeedConfirm: "フィード「${name}」を削除しますか？",
+    deleteFeedConfirmBookmarks: "フィード「${name}」を削除しますか？\nこのフィードのブックマーク ${n} 件も削除されます。",
+    deleteFolderConfirm: "フォルダ「${name}」を削除しますか？（中のフィードは残ります）",
     unsupportedFormat: "対応するフィード形式が見つかりません",
     justNow: "たった今",
     minutesAgo: "${n} 分前",
@@ -127,6 +132,11 @@ const translations = {
     loading: "Loading...",
     fetchError: "Failed to fetch feed: ",
     xmlParseError: "Failed to parse XML",
+    feedTooLarge: "The feed is too large (over 10 MB)",
+    feedNamePlaceholder: "Feed name",
+    deleteFeedConfirm: "Delete the feed \"${name}\"?",
+    deleteFeedConfirmBookmarks: "Delete the feed \"${name}\"?\nIts ${n} bookmark(s) will be deleted too.",
+    deleteFolderConfirm: "Delete the folder \"${name}\"? (Its feeds are kept.)",
     unsupportedFormat: "Unsupported feed format",
     justNow: "Just now",
     minutesAgo: "${n}m ago",
@@ -229,9 +239,17 @@ const folderModalError = document.getElementById("folder-modal-error");
 
 // ===== Init =====
 document.addEventListener("DOMContentLoaded", async () => {
+  // Only one reader tab: each tab holds its own copy of the data and would overwrite the
+  // other's changes. A second one (opened from a bookmark, a duplicated tab, ...) hands
+  // over to the first and closes (B3).
+  if (await focusExistingReader()) return;
   await loadState();
+  selection = selectionFromHash(location.hash); // a reload stays on the same view
+  const restoredScroll = history.state?.scroll || 0; // kept by the browser across reloads
+  history.replaceState({ ...(history.state || {}), scroll: restoredScroll }, "", selectionHash(selection));
   renderFeedList();
   renderArticles();
+  setScrollTop(restoredScroll);
   bindEvents();
   // Set icon on load and watch for OS color scheme changes
   updateActionIcon();
@@ -271,6 +289,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         folders = incoming;
         if (selection.type === "folder" && !folders.some((f) => f.id === selection.folderId)) {
           selection = { type: "all" };
+          syncUrl();
         }
         renderFeedList();
         renderArticles();
@@ -280,7 +299,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (refreshing) return; // our own incremental saves
       const incoming = changes.feeds.newValue || [];
       if (JSON.stringify(incoming) === lastSavedFeedsJson) return; // our own write
+      // The selected feed is found again by URL: its index may differ in the new list
+      const selectedUrl = selection.type === "feed" ? feeds[selection.feedIndex]?.url : null;
       feeds = incoming;
+      if (selectedUrl !== null) {
+        const idx = feeds.findIndex((f) => f.url === selectedUrl);
+        selection = idx >= 0 ? { type: "feed", feedIndex: idx } : { type: "all" };
+        if (idx < 0) syncUrl();
+      }
       renderFeedList();
       renderArticles();
     }
@@ -290,6 +316,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 });
+
+async function focusExistingReader() {
+  try {
+    const self = await chrome.tabs.getCurrent();
+    const readerUrl = chrome.runtime.getURL("reader.html");
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
+    const other = contexts.find((c) => c.tabId >= 0 && c.tabId !== self?.id && (c.documentUrl || "").startsWith(readerUrl));
+    if (!other || !self) return false;
+    await chrome.tabs.update(other.tabId, { active: true });
+    await chrome.windows.update(other.windowId, { focused: true });
+    await chrome.tabs.remove(self.id);
+    return true;
+  } catch {
+    return false; // when in doubt, just open normally
+  }
+}
 
 // ===== Storage =====
 async function loadState() {
@@ -361,6 +403,7 @@ function bindEvents() {
     "scroll",
     () => {
       if (performance.now() - lastProgrammaticScrollAt > 300) lastUserScrollAt = performance.now();
+      rememberScroll();
     },
     { passive: true }
   );
@@ -377,13 +420,12 @@ function bindEvents() {
   feedListEl.addEventListener("dragover", (e) => e.preventDefault());
   feedListEl.addEventListener("drop", async (e) => {
     if (e.target !== feedListEl) return;
+    const feed = draggedFeed(e);
+    if (!feed) return;
     e.preventDefault();
-    const feedIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
-    if (!isNaN(feedIdx) && feeds[feedIdx]) {
-      feeds[feedIdx].folderId = null;
-      await saveFeeds();
-      renderFeedList();
-    }
+    feed.folderId = null;
+    await saveFeeds();
+    renderFeedList();
   });
 
   // isComposing: Enter that confirms an IME conversion must not submit the form
@@ -451,7 +493,7 @@ function renderFeedList() {
     folderLi.className = "folder-item" + (selection.type === "folder" && selection.folderId === folder.id ? " active" : "");
     folderLi.setAttribute("data-folder-id", folder.id);
     const folderFeeds = feeds.filter((f) => f.folderId === folder.id);
-    const folderUnread = folderFeeds.reduce((s, f) => s + getUnreadCount(f), 0);
+    const folderUnread = unreadLinks(folderFeeds).size;
 
     folderLi.innerHTML = `
       <span class="folder-toggle">${folder.collapsed ? "▶" : "▼"}</span>
@@ -485,12 +527,11 @@ function renderFeedList() {
     folderLi.addEventListener("drop", async (e) => {
       e.preventDefault();
       folderLi.classList.remove("drag-over");
-      const feedIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
-      if (!isNaN(feedIdx) && feeds[feedIdx]) {
-        feeds[feedIdx].folderId = folder.id;
-        await saveFeeds();
-        renderFeedList();
-      }
+      const feed = draggedFeed(e);
+      if (!feed) return;
+      feed.folderId = folder.id;
+      await saveFeeds();
+      renderFeedList();
     });
 
     feedListEl.appendChild(folderLi);
@@ -518,12 +559,76 @@ function setScrollTop(v) {
   articleListEl.scrollTop = v;
 }
 
-function selectAndRender(sel) {
+// Switch the view. Each switch is a browser history entry with the view in the URL hash,
+// so back / forward move between views and a reload stays on the same one. Feeds are
+// recorded by URL, since their index shifts when feeds are added or removed.
+function selectAndRender(sel, { fromHistory = false, scrollTop = 0 } = {}) {
+  if (!fromHistory) {
+    // Save where the view being left was scrolled, then add an entry for the new one
+    clearTimeout(historyScrollTimer);
+    historyScrollTimer = null;
+    history.replaceState({ ...(history.state || {}), scroll: articleListEl.scrollTop }, "");
+    const hash = selectionHash(sel);
+    // Compare with the URL, not the old selection: they differ when the selection was
+    // changed without an entry (e.g. the shown feed was deleted) (B8)
+    if (hash !== location.hash) history.pushState({ scroll: 0 }, "", hash);
+  }
   selection = sel;
   tempShowRead = false;
-  setScrollTop(0);
   renderFeedList();
   renderArticles();
+  setScrollTop(scrollTop);
+}
+
+function selectionHash(sel) {
+  if (sel.type === "feed") return "#feed/" + encodeURIComponent(feeds[sel.feedIndex]?.url || "");
+  if (sel.type === "folder") return "#folder/" + encodeURIComponent(sel.folderId);
+  return "#" + sel.type;
+}
+
+// The view a URL hash names, or "all" if the feed / folder it names is gone
+function selectionFromHash(hash) {
+  const m = (hash || "").match(/^#(\w+)(?:\/(.*))?$/);
+  if (!m) return { type: "all" };
+  let arg = "";
+  try {
+    arg = m[2] ? decodeURIComponent(m[2]) : "";
+  } catch {
+    return { type: "all" }; // a malformed hash (hand-edited, cut off) must not stop the page (B2)
+  }
+  if (["all", "bookmark", "stats"].includes(m[1])) return { type: m[1] };
+  if (m[1] === "folder" && folders.some((f) => f.id === arg)) return { type: "folder", folderId: arg };
+  if (m[1] === "feed") {
+    const idx = feeds.findIndex((f) => f.url === arg);
+    if (idx >= 0) return { type: "feed", feedIndex: idx };
+  }
+  return { type: "all" };
+}
+
+window.addEventListener("popstate", (e) => {
+  const sel = selectionFromHash(location.hash);
+  // Correct the URL when it named something that no longer exists
+  if (selectionHash(sel) !== location.hash) history.replaceState(e.state, "", selectionHash(sel));
+  selectAndRender(sel, { fromHistory: true, scrollTop: e.state?.scroll || 0 });
+});
+
+// Point the current history entry's URL at the current selection, for changes made
+// without navigating (deleting the shown feed or folder) (B8)
+function syncUrl() {
+  const hash = selectionHash(selection);
+  if (hash !== location.hash) history.replaceState(history.state, "", hash);
+}
+
+// Keep the current history entry's scroll position up to date, so coming back to a view
+// (with back or forward) returns to where it was left. Short interval: on back / forward
+// the entry has already changed, so a pending save for the old view can't be flushed.
+let historyScrollTimer = null;
+function rememberScroll() {
+  if (historyScrollTimer) return;
+  historyScrollTimer = setTimeout(() => {
+    historyScrollTimer = null;
+    history.replaceState({ ...(history.state || {}), scroll: articleListEl.scrollTop }, "");
+  }, 120);
 }
 
 // CSP blocks inline onerror handlers in extension pages, so bind them here
@@ -536,6 +641,16 @@ function bindFaviconErrors(container) {
   });
 }
 
+// Feeds are dragged under a private data type carrying their URL. Text dragged from
+// anywhere else ("3 ways to ...") has no such type, so it can never move a feed (B1).
+const FEED_DRAG_TYPE = "application/x-rss-reader-feed";
+
+function draggedFeed(e) {
+  if (!e.dataTransfer.types.includes(FEED_DRAG_TYPE)) return null;
+  const url = e.dataTransfer.getData(FEED_DRAG_TYPE);
+  return feeds.find((f) => f.url === url) || null;
+}
+
 function createFeedLi(feed, idx) {
   const li = document.createElement("li");
   const isActive = selection.type === "feed" && selection.feedIndex === idx;
@@ -545,10 +660,10 @@ function createFeedLi(feed, idx) {
 
   const faviconUrl = getFaviconUrl(feed);
   const errorIcon = feed.error
-    ? `<span class="feed-error" title="${escapeHtml(feed.error)}">⚠</span>`
+    ? `<span class="feed-error" title="${escapeHtml(describeFeedError(feed.error))}">⚠</span>`
     : "";
   li.innerHTML = `
-    <img class="feed-icon" src="${faviconUrl}">
+    <img class="feed-icon" src="${escapeHtml(faviconUrl)}">
     <span class="feed-name" title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</span>
     ${errorIcon}
     <span class="feed-count">${getUnreadCount(feed)}</span>
@@ -562,7 +677,7 @@ function createFeedLi(feed, idx) {
   });
 
   li.addEventListener("dragstart", (e) => {
-    e.dataTransfer.setData("text/plain", String(idx));
+    e.dataTransfer.setData(FEED_DRAG_TYPE, feed.url);
     e.dataTransfer.effectAllowed = "move";
     li.classList.add("dragging");
   });
@@ -582,8 +697,13 @@ function showMenu(menu) {
   menu.style.top = top + "px";
 }
 
-function showFeedContextMenu(e, feedIndex) {
+function showFeedContextMenu(e, feedIndexAtOpen) {
   document.querySelectorAll(".feed-context-menu").forEach((m) => m.remove());
+  // Hold on to the feed's URL, not its index: the list can change while the menu is open
+  // (a refresh, another change), and the index would then point at a different feed (B3).
+  const feedUrl = feeds[feedIndexAtOpen]?.url;
+  const current = () => feeds.find((f) => f.url === feedUrl);
+  if (!current()) return;
   const menu = document.createElement("div");
   menu.className = "feed-context-menu";
   menu.style.left = e.clientX + "px";
@@ -602,7 +722,7 @@ function showFeedContextMenu(e, feedIndex) {
       moveBtn.textContent = folder.name;
       moveBtn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        feeds[feedIndex].folderId = folder.id;
+        if (current()) current().folderId = folder.id;
         await saveFeeds();
         renderFeedList();
         menu.remove();
@@ -610,13 +730,13 @@ function showFeedContextMenu(e, feedIndex) {
       menu.appendChild(moveBtn);
     });
 
-    if (feeds[feedIndex].folderId) {
+    if (current().folderId) {
       const removeFromFolder = document.createElement("div");
       removeFromFolder.className = "context-menu-sub";
       removeFromFolder.textContent = t("removeFromFolder");
       removeFromFolder.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        feeds[feedIndex].folderId = null;
+        if (current()) current().folderId = null;
         await saveFeeds();
         renderFeedList();
         menu.remove();
@@ -634,15 +754,24 @@ function showFeedContextMenu(e, feedIndex) {
   deleteBtn.textContent = t("deleteFeed");
   deleteBtn.addEventListener("click", async (ev) => {
     ev.stopPropagation();
+    menu.remove();
+    const target = current();
+    if (!target) return;
+    const feedIndex = feeds.indexOf(target);
+    // Bookmarks only store links; the ones whose article goes away with the feed are lost
+    const present = new Set();
+    feeds.forEach((f) => f !== target && (f.items || []).forEach((it) => it.link && present.add(it.link)));
+    const remaining = [...bookmarkedArticles].filter((l) => present.has(l));
+    const lost = bookmarkedArticles.size - remaining.length;
+    const name = target.title || target.url;
+    if (!confirm(lost ? t("deleteFeedConfirmBookmarks", { name, n: lost }) : t("deleteFeedConfirm", { name }))) return;
     feeds.splice(feedIndex, 1);
     if (selection.type === "feed") {
-      if (selection.feedIndex === feedIndex) selection = { type: "all" };
-      else if (selection.feedIndex > feedIndex) selection.feedIndex--;
+      if (selection.feedIndex === feedIndex) {
+        selection = { type: "all" };
+        syncUrl();
+      } else if (selection.feedIndex > feedIndex) selection.feedIndex--;
     }
-    // Bookmarks only store links; drop the ones whose article went away with the feed
-    const present = new Set();
-    feeds.forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
-    const remaining = [...bookmarkedArticles].filter((l) => present.has(l));
     if (remaining.length !== bookmarkedArticles.size) {
       bookmarkedArticles = new Set(remaining);
       await saveBookmarks();
@@ -650,7 +779,6 @@ function showFeedContextMenu(e, feedIndex) {
     await saveFeeds();
     renderFeedList();
     renderArticles();
-    menu.remove();
   });
 
   menu.appendChild(deleteBtn);
@@ -687,6 +815,8 @@ function showFolderContextMenu(e, folder) {
   deleteBtn.textContent = t("deleteFolder");
   deleteBtn.addEventListener("click", async (ev) => {
     ev.stopPropagation();
+    menu.remove();
+    if (!confirm(t("deleteFolderConfirm", { name: folder.name }))) return;
     // Remove folder, move feeds to root
     feeds.forEach((f) => {
       if (f.folderId === folder.id) f.folderId = null;
@@ -694,12 +824,12 @@ function showFolderContextMenu(e, folder) {
     folders = folders.filter((f) => f.id !== folder.id);
     if (selection.type === "folder" && selection.folderId === folder.id) {
       selection = { type: "all" };
+      syncUrl();
     }
     await saveFeeds();
     await saveFolders();
     renderFeedList();
     renderArticles();
-    menu.remove();
   });
   menu.appendChild(deleteBtn);
   showMenu(menu);
@@ -726,7 +856,7 @@ function renderArticles() {
   } else {
     const feed = feeds[selection.feedIndex];
     feedTitleEl.textContent = feed
-      ? `${feed.title}${feed.description ? " / " + feed.description : ""}`
+      ? `${feed.title}${feed.description ? " / " + collapseSpaces(htmlToText(feed.description)) : ""}`
       : "";
   }
 
@@ -840,7 +970,7 @@ function createArticleRow(a) {
   row.innerHTML = `
         ${imageHtml}
         <div class="article-source">
-          <img class="article-favicon" src="${getFaviconUrl(feeds[a._feedIndex])}" width="16" height="16">
+          <img class="article-favicon" src="${escapeHtml(getFaviconUrl(feeds[a._feedIndex]))}" width="16" height="16">
           <span class="article-source-name">${escapeHtml(a._feedTitle)}</span>
         </div>
         <a class="article-title"${isHttpUrl(a.link) ? ` href="${escapeHtml(a.link.trim())}"` : ""} rel="noopener" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</a>
@@ -1152,7 +1282,7 @@ let statsSort = { key: "rate", dir: -1 };
 const DAY_MS = 86400000;
 
 function feedStats(feed, now) {
-  const items = feed.itemCount ? (feed.items || []).slice(0, feed.itemCount) : feed.items || [];
+  const items = feed.itemCount != null ? (feed.items || []).slice(0, feed.itemCount) : feed.items || [];
   const times = items
     .map((it) => (typeof it.timestamp === "number" ? it.timestamp : parseFeedDate(it.pubDate)))
     .filter((ts) => ts !== null && ts <= now + DAY_MS)
@@ -1262,7 +1392,7 @@ function renderFeedStats() {
               return `<tr data-index="${r.index}" class="${dormantRow ? "dormant" : ""}">
                 <td><div class="stats-name"><img class="feed-icon" src="${escapeHtml(getFaviconUrl(f))}" width="16" height="16"><span>${escapeHtml(
                   f.title || f.url
-                )}</span>${f.error ? `<span class="feed-error" title="${escapeHtml(f.error)}">⚠</span>` : ""}</div></td>
+                )}</span>${f.error ? `<span class="feed-error" title="${escapeHtml(describeFeedError(f.error))}">⚠</span>` : ""}</div></td>
                 <td class="num">${r.last ? escapeHtml(ago(r.last)) : r.items ? escapeHtml(t("noDates")) : "—"}</td>
                 <td class="num">${escapeHtml(formatRate(r.rate))}</td>
                 <td class="num">${escapeHtml(formatInterval(r.interval))}</td>
@@ -1288,7 +1418,10 @@ function renderFeedStats() {
   articleListEl.querySelectorAll("tbody tr").forEach((tr) => {
     const idx = Number(tr.dataset.index);
     tr.addEventListener("click", () => selectAndRender({ type: "feed", feedIndex: idx }));
-    tr.addEventListener("contextmenu", (e) => showFeedContextMenu(e, idx));
+    tr.addEventListener("contextmenu", (e) => {
+      e.preventDefault(); // or the browser's own menu shows too (B7)
+      showFeedContextMenu(e, idx);
+    });
   });
 }
 
@@ -1304,28 +1437,42 @@ function mergeItems(existingItems, newItems) {
 
 const REFRESH_CONCURRENCY = 4;
 
+// A refresh requested while one runs (e.g. an OPML import adding feeds) runs again right
+// after it, so the new feeds are fetched (B4).
+let refreshAgain = false;
+
 async function refreshAll() {
-  if (refreshing) return;
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
   refreshing = true;
   const btn = document.getElementById("btn-refresh");
   btn.textContent = "⏳";
   btn.disabled = true;
 
-  // Saves are coalesced: while one write is in flight, any number of finished feeds share
-  // the next one. A failed write (e.g. storage quota) is logged and must not stop the
-  // refresh; the data is still in memory and the next save retries it.
-  let dirty = false;
+  // Saves are coalesced and written at most every 2 seconds (each write sends the whole
+  // feed list to every listener) (P2). A failed write (e.g. storage quota) is logged and
+  // must not stop the refresh; the data is still in memory and the next save retries it.
   let saving = Promise.resolve();
+  let saveTimer = null;
+  const doSave = () => {
+    saveTimer = null;
+    saving = saving.then(() => saveFeeds()).catch((e) => console.warn("Failed to save feeds", e));
+  };
   const saveSoon = () => {
-    dirty = true;
-    saving = saving
-      .then(() => {
-        if (!dirty) return;
-        dirty = false;
-        return saveFeeds();
-      })
-      .catch((e) => console.warn("Failed to save feeds", e));
-    return saving;
+    if (!saveTimer) saveTimer = setTimeout(doSave, 2000);
+  };
+  // Re-render at most every 500 ms instead of after every feed: with many feeds, a full
+  // re-render per feed kept the page busy for the whole refresh (P1).
+  let renderTimer = null;
+  const renderSoon = () => {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      renderFeedList();
+      renderArticles();
+    }, 500);
   };
 
   try {
@@ -1354,15 +1501,19 @@ async function refreshAll() {
           feed.error = e.message || String(e);
           console.warn(`Failed to refresh: ${feed.url}`, e);
         }
-        // Update UI and save after each feed so articles appear incrementally
-        renderFeedList();
-        renderArticles();
+        // Articles appear incrementally, a few times a second at most
+        renderSoon();
         saveSoon();
       }
     };
     // Several feeds at a time, so one slow or dead server doesn't hold up the rest
     await Promise.all(Array.from({ length: REFRESH_CONCURRENCY }, worker));
+    clearTimeout(saveTimer);
+    doSave();
     await saving;
+    clearTimeout(renderTimer);
+    renderFeedList();
+    renderArticles();
     try {
       await saveReadArticles(); // prunes stale read entries
     } catch (e) {
@@ -1372,6 +1523,10 @@ async function refreshAll() {
     btn.textContent = "⟳";
     btn.disabled = false;
     refreshing = false;
+    if (refreshAgain) {
+      refreshAgain = false;
+      refreshAll();
+    }
   }
 }
 
@@ -1407,7 +1562,7 @@ async function fetchFeed(url) {
 async function fetchText(url) {
   const resp = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(20000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const text = decodeFeedBytes(await resp.arrayBuffer(), resp.headers.get("content-type"));
+  const text = decodeFeedBytes(await readBodyLimited(resp), resp.headers.get("content-type"));
   // resp.url is the final URL after redirects: the base for relative links
   return { text, baseUrl: resp.url || url };
 }
@@ -1688,7 +1843,14 @@ function formatDate(dateStr) {
 }
 
 function getUnreadCount(feed) {
-  return (feed.items || []).filter((it) => !readArticles.has(it.link)).length;
+  return unreadLinks([feed]).size;
+}
+
+// Unread article links in the given feeds; an article in several feeds counts once (B6)
+function unreadLinks(list) {
+  const links = new Set();
+  for (const f of list) for (const it of f.items || []) if (it.link && !readArticles.has(it.link)) links.add(it.link);
+  return links;
 }
 
 // Bookmarked articles that still exist in some feed (what the bookmark view can show)
@@ -1717,27 +1879,32 @@ function markAllRead() {
 }
 
 function getTotalUnread() {
-  return feeds.reduce((sum, f) => sum + getUnreadCount(f), 0);
+  return unreadLinks(feeds).size;
 }
 
+// Favicons come from the browser's own favicon cache (the "favicon" permission's
+// _favicon/ endpoint) instead of Google's favicon service, which would learn every site
+// the user subscribes to (S1). Sites never visited in this browser show a generic icon.
 function getFaviconUrl(feed) {
-  if (!feed || !feed.siteUrl) {
-    if (feed && feed.url) {
-      try {
-        const u = new URL(feed.url);
-        return `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=32`;
-      } catch {
-        return "";
-      }
-    }
-    return "";
-  }
+  if (!feed) return "";
+  let pageUrl = feed.siteUrl || feed.url || "";
   try {
-    const u = new URL(feed.siteUrl);
-    return `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=32`;
+    pageUrl = new URL(pageUrl).origin + "/";
   } catch {
     return "";
   }
+  return `${chrome.runtime.getURL("/_favicon/")}?pageUrl=${encodeURIComponent(pageUrl)}&size=32`;
+}
+
+// Feed errors are stored as written at the time: English internal messages from the
+// background refresh, or text in whichever language the reader used then. Show them in
+// the current language where we know them (B12).
+function describeFeedError(msg) {
+  const all = (key) => [translations.ja[key], translations.en[key]];
+  if (msg === "XML parse error" || all("xmlParseError").includes(msg)) return t("xmlParseError");
+  if (msg === "Unsupported feed format" || all("unsupportedFormat").includes(msg)) return t("unsupportedFormat");
+  if (msg === "Feed too large") return t("feedTooLarge");
+  return msg;
 }
 
 function escapeHtml(str) {
@@ -1907,7 +2074,7 @@ function showSettingsMenu() {
 
   // Language
   const langHeader = document.createElement("div");
-  langHeader.className = "settings-menu-header";
+  langHeader.className = "context-menu-header";
   langHeader.textContent = t("language");
   menu.appendChild(langHeader);
   const langOptions = [
@@ -1971,6 +2138,9 @@ function applyFont() {
 }
 
 function applyLanguage() {
+  document.documentElement.lang = language;
+  document.getElementById("feed-name-input").placeholder = t("feedNamePlaceholder");
+  document.getElementById("folder-name-input").placeholder = t("folderName");
   document.title = t("appTitle");
   document.querySelector("#sidebar-header h1").textContent = t("appTitle");
   document.getElementById("btn-add-folder").title = t("addFolder");
@@ -2071,6 +2241,7 @@ async function handleOpmlImport(e) {
     const topOutlines = body.querySelectorAll(":scope > outline");
     for (const outline of topOutlines) {
       const xmlUrl = outline.getAttribute("xmlUrl");
+      if (xmlUrl && !isHttpUrl(xmlUrl)) continue; // relative, data:, ... are never fetched (S5)
       if (xmlUrl) {
         // Top-level feed
         if (!existingUrls.has(feedUrlKey(xmlUrl))) {
@@ -2097,7 +2268,7 @@ async function handleOpmlImport(e) {
         const children = outline.querySelectorAll("outline");
         for (const child of children) {
           const childUrl = child.getAttribute("xmlUrl");
-          if (childUrl && !existingUrls.has(feedUrlKey(childUrl))) {
+          if (childUrl && isHttpUrl(childUrl) && !existingUrls.has(feedUrlKey(childUrl))) {
             feeds.push(outlineToFeed(child, folder.id));
             existingUrls.add(feedUrlKey(childUrl));
             importedFeeds++;

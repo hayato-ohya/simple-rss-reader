@@ -1132,3 +1132,28 @@ html.dark ::-webkit-scrollbar-thumb {
 html.dark ::-webkit-scrollbar-thumb:hover {
   background: #777;
 }
+
+/* ===== Review fixes ===== */
+/* Native controls (selects, scrollbars, dialogs) follow the dark theme too */
+html.dark {
+  color-scheme: dark;
+}
+
+/* Menu section headers never highlight, also in dark mode (the dark item hover rule is
+   more specific than the light header rule) */
+html.dark .feed-context-menu .context-menu-header:hover {
+  background: transparent;
+}
+
+/* Card view: fewer columns in narrow windows instead of squeezing three */
+@media (max-width: 1100px) {
+  #article-list.card-view .article-row {
+    width: calc(50% - 8px);
+  }
+}
+
+@media (max-width: 760px) {
+  #article-list.card-view .article-row {
+    width: 100%;
+  }
+}

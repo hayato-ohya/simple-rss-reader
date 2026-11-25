@@ -171,7 +171,7 @@ async function runFeedUpdate() {
       try {
         const resp = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(15000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const text = decodeFeedBytes(await resp.arrayBuffer(), resp.headers.get("content-type"));
+        const text = decodeFeedBytes(await readBodyLimited(resp), resp.headers.get("content-type"));
         result = { items: await parseFeedViaOffscreen(text, resp.url || url) };
       } catch (e) {
         result = { error: e.message || String(e) };
@@ -188,8 +188,9 @@ async function runFeedUpdate() {
   }
   if (aborted) return;
 
-  const { feeds = [], readArticles = [] } = await chrome.storage.local.get(["feeds", "readArticles"]);
-  await prefetchArticleImages(feeds, new Set(readArticles));
+  // Article images only appear in card view; in list view, don't fetch article pages at all
+  const { feeds = [], readArticles = [], isCardView = false } = await chrome.storage.local.get(["feeds", "readArticles", "isCardView"]);
+  if (isCardView) await prefetchArticleImages(feeds, new Set(readArticles));
 }
 
 // ===== og:image prefetch for unread articles without a feed image =====
@@ -215,7 +216,13 @@ async function prefetchArticleImages(feeds, readSet) {
 
   const present = new Set();
   feeds.forEach((f) => (f.items || []).forEach((it) => it.link && present.add(it.link)));
+  let aborted = false;
   const persist = async () => {
+    // Once the reader is open it manages imageCache; writing ours would undo its entries
+    if (aborted || (await isReaderOpen())) {
+      aborted = true;
+      return;
+    }
     const entries = Object.entries(imageCache).filter(([l]) => present.has(l));
     await chrome.storage.local.set({ imageCache: Object.fromEntries(entries.slice(-IMAGE_CACHE_MAX)) });
   };
@@ -224,7 +231,7 @@ async function prefetchArticleImages(feeds, readSet) {
   // alive; persisting after every result both saves progress and resets the idle timer.
   let idx = 0;
   async function worker() {
-    while (idx < batch.length) {
+    while (!aborted && idx < batch.length) {
       const it = batch[idx++];
       imageCache[it.link] = await fetchPageImage(it.link).catch(() => "");
       await persist();
