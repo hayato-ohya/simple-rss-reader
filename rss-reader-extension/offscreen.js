@@ -4,7 +4,8 @@
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target !== "offscreen" || msg.type !== "parseFeed") return;
   try {
-    sendResponse({ ok: true, items: parseFeedXml(msg.text, msg.baseUrl).items });
+    const { items, siteUrl, iconUrl, logoUrl } = parseFeedXml(msg.text, msg.baseUrl);
+    sendResponse({ ok: true, result: { items, siteUrl, iconUrl, logoUrl } });
   } catch (e) {
     sendResponse({ ok: false, error: e.message || String(e) });
   }

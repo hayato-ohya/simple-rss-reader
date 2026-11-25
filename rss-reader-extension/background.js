@@ -153,6 +153,7 @@ async function runFeedUpdate() {
             (link) => bookmarkSet.has(link)
           );
           feed.itemCount = r.items.length; // the current feed's items come first in feed.items
+          applyFeedIconSources(feed, r);
           feed.lastUpdated = Date.now();
           delete feed.error;
         }
@@ -172,7 +173,7 @@ async function runFeedUpdate() {
         const resp = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(15000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const text = decodeFeedBytes(await readBodyLimited(resp), resp.headers.get("content-type"));
-        result = { items: await parseFeedViaOffscreen(text, resp.url || url) };
+        result = await parseFeedViaOffscreen(text, resp.url || url);
       } catch (e) {
         result = { error: e.message || String(e) };
       }
@@ -316,5 +317,5 @@ async function parseFeedViaOffscreen(text, baseUrl) {
   const res = await chrome.runtime.sendMessage({ target: "offscreen", type: "parseFeed", text, baseUrl });
   if (!res) throw new Error("No response from parser");
   if (!res.ok) throw new Error(res.error);
-  return res.items;
+  return res.result;
 }

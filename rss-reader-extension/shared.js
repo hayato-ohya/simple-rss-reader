@@ -278,13 +278,28 @@ function extractItemImage(el, htmlCandidates) {
 // Throws an Error with .code "xml" (not well-formed) or "format" (not a feed).
 // Items without a usable http(s) link are skipped: the reader can only open links, and
 // everything about an article (read state, bookmarks) is keyed by its link.
+// Keep a feed's icon sources up to date from a fetch result. A new source means the stored
+// icon may be wrong or missing for a reason that no longer holds, so it is looked up again.
+function applyFeedIconSources(feed, result) {
+  if (!feed.siteUrl && result.siteUrl) feed.siteUrl = result.siteUrl; // e.g. imported from OPML
+  const iconUrl = result.iconUrl || "";
+  const logoUrl = result.logoUrl || "";
+  if ((feed.feedIconUrl || "") !== iconUrl || (feed.feedLogoUrl || "") !== logoUrl) {
+    feed.feedIconUrl = iconUrl;
+    feed.feedLogoUrl = logoUrl;
+    feed.iconCheckedAt = 0;
+  }
+}
+
 function parseFeedXml(text, baseUrl) {
   const xml = new DOMParser().parseFromString(text, "text/xml");
   if (xml.querySelector("parsererror")) {
     throw Object.assign(new Error("XML parse error"), { code: "xml" });
   }
 
-  const result = { title: "", description: "", siteUrl: "", items: [] };
+  // iconUrl: the feed's own small square icon (Atom <icon>); logoUrl: a larger, often wide
+  // logo (RSS <image>, Atom <logo>), only good as a last resort for the feed's icon
+  const result = { title: "", description: "", siteUrl: "", iconUrl: "", logoUrl: "", items: [] };
   // An article listed twice in one feed would be counted twice (unread counts, stats)
   // while shown once; keep the first.
   const seenLinks = new Set();
@@ -300,6 +315,11 @@ function parseFeedXml(text, baseUrl) {
     result.title = cleanRssTitle(rssChildText(channel, "title"));
     result.description = collapseSpaces(htmlToText(rssChildText(channel, "description")));
     result.siteUrl = rssChildText(channel, "link").trim();
+    // RSS 2.0 nests <image> in <channel>; RSS 1.0 puts it next to the channel
+    const image = [...channel.children, ...(xml.documentElement?.children || [])].find(
+      (el) => el.localName === "image" && RSS_NAMESPACES.includes(el.namespaceURI)
+    );
+    if (image) result.logoUrl = resolveItemLink(rssChildText(image, "url").trim(), baseUrl);
 
     xml.querySelectorAll("item").forEach((item) => {
       const description = rssChildText(item, "description");
@@ -327,6 +347,8 @@ function parseFeedXml(text, baseUrl) {
       atomFeed.querySelector(':scope > link[rel="alternate"]') ||
       atomFeed.querySelector(":scope > link:not([rel])");
     result.siteUrl = siteLink?.getAttribute("href") || "";
+    result.iconUrl = resolveItemLink((atomFeed.querySelector(":scope > icon")?.textContent || "").trim(), baseUrl);
+    result.logoUrl = resolveItemLink((atomFeed.querySelector(":scope > logo")?.textContent || "").trim(), baseUrl);
 
     xml.querySelectorAll("entry").forEach((entry) => {
       const rawLink = atomEntryLink(entry);

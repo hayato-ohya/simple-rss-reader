@@ -279,6 +279,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateActionIcon);
   // Refresh on open only if the stored data is stale (background refresh keeps it fresh)
   if (isStale()) refreshAll();
+  else ensureFeedIcons();
   // When background service worker updates feeds in storage, reload and re-render
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
@@ -1052,6 +1053,12 @@ function createArticleRow(a) {
 function updateArticleRow(row, a) {
   row.classList.toggle("read", readArticles.has(a.link));
   row.dataset.feedIndex = String(a._feedIndex);
+  const fav = row.querySelector(".article-favicon");
+  const favUrl = getFaviconUrl(feeds[a._feedIndex]);
+  if (fav && fav.getAttribute("src") !== favUrl) {
+    fav.style.display = "";
+    fav.src = favUrl;
+  }
   const timeEl = row.querySelector(".article-time");
   if (timeEl) timeEl.textContent = relativeTime(a.pubDate);
   const bm = row.querySelector(".bookmark-btn");
@@ -1293,6 +1300,8 @@ async function addFeed() {
       title: customName || result.title || url,
       description: result.description || "",
       siteUrl: result.siteUrl || "",
+      feedIconUrl: result.iconUrl || "",
+      feedLogoUrl: result.logoUrl || "",
       items: mergeItems([], result.items || []),
       itemCount: (result.items || []).length,
       folderId: feedFolderSelect.value || null,
@@ -1303,6 +1312,7 @@ async function addFeed() {
     closeModal();
     renderFeedList();
     renderArticles();
+    ensureFeedIcons();
   } catch (err) {
     showModalError(t("fetchError") + err.message);
   } finally {
@@ -1536,6 +1546,7 @@ async function refreshAll() {
           if (result.description) {
             feed.description = result.description;
           }
+          applyFeedIconSources(feed, result);
         } catch (e) {
           if (!feeds.includes(feed)) continue;
           feed.error = e.message || String(e);
@@ -1566,6 +1577,8 @@ async function refreshAll() {
     if (refreshAgain) {
       refreshAgain = false;
       refreshAll();
+    } else {
+      ensureFeedIcons();
     }
   }
 }
@@ -2021,11 +2034,17 @@ function getTotalUnread() {
   return unreadLinks(feeds).size;
 }
 
-// Favicons come from the browser's own favicon cache (the "favicon" permission's
-// _favicon/ endpoint) instead of Google's favicon service, which would learn every site
-// the user subscribes to (S1). Sites never visited in this browser show a generic icon.
+// Each feed's icon is fetched from its site and stored with the feed (feed.icon, a small
+// data: URL), see ensureFeedIcons. Until then, or when the site has none, the browser's
+// favicon cache is used (the "favicon" permission's _favicon/ endpoint, rather than
+// Google's favicon service, which would learn every site the user follows). That cache
+// can't be trusted on its own: asked for a page it has no entry for, it answers with the
+// icon of any other page it saw on the same host, and a page that redirected elsewhere
+// (a tracking link, a site that moved) is recorded with the icon of where it ended up,
+// so a feed could show another site's icon.
 function getFaviconUrl(feed) {
   if (!feed) return "";
+  if (feed.icon && feed.icon.startsWith("data:image/")) return feed.icon;
   let pageUrl = feed.siteUrl || feed.url || "";
   try {
     pageUrl = new URL(pageUrl).origin + "/";
@@ -2033,6 +2052,196 @@ function getFaviconUrl(feed) {
     return "";
   }
   return `${chrome.runtime.getURL("/_favicon/")}?pageUrl=${encodeURIComponent(pageUrl)}&size=32`;
+}
+
+// ===== Site icons =====
+const ICON_SIZE = 32;
+const ICON_RECHECK_MS = 30 * 86400000; // sites rarely change their icon
+const ICON_RETRY_MS = 3600000; // after a failure (often a passing network problem)
+const ICON_PAGE_MAX_BYTES = 2 * 1024 * 1024;
+const ICON_MAX_BYTES = 512 * 1024;
+let iconsRunning = false;
+let iconsAgain = false;
+
+function feedSiteUrl(feed) {
+  for (const u of [feed.siteUrl, feed.url]) {
+    try {
+      const url = new URL(u, feed.url);
+      if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+    } catch {}
+  }
+  return "";
+}
+
+function needsIcon(feed, now) {
+  if (!feedSiteUrl(feed) && !feed.feedIconUrl) return false;
+  if (!feed.iconCheckedAt) return true;
+  return now - feed.iconCheckedAt > (feed.icon ? ICON_RECHECK_MS : ICON_RETRY_MS);
+}
+
+// Icon candidates declared by the site's page, best first: SVG or the size closest to
+// what we draw, then the touch icons (large, but always square and sharp), then the
+// conventional /favicon.ico.
+function iconCandidates(html, pageUrl) {
+  if (!html) {
+    try {
+      return [new URL("/favicon.ico", pageUrl).href];
+    } catch {
+      return [];
+    }
+  }
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const base = doc.querySelector("base[href]")?.getAttribute("href");
+  let baseUrl = pageUrl;
+  try {
+    if (base) baseUrl = new URL(base, pageUrl).href;
+  } catch {}
+  const found = [];
+  doc.querySelectorAll("link[rel][href]").forEach((el) => {
+    const rel = el.getAttribute("rel").toLowerCase().split(/\s+/);
+    const touch = rel.includes("apple-touch-icon") || rel.includes("apple-touch-icon-precomposed");
+    if (!rel.includes("icon") && !touch) return;
+    let href;
+    try {
+      href = new URL(el.getAttribute("href"), baseUrl).href;
+    } catch {
+      return;
+    }
+    if (!/^(https?:|data:image\/)/i.test(href)) return;
+    const svg = /svg/i.test(el.getAttribute("type") || "") || /\.svg(\?|$)/i.test(href);
+    const size = Math.max(0, ...(el.getAttribute("sizes") || "").split(/\s+/).map((v) => parseInt(v, 10) || 0));
+    // Lower is better: exact-ish sizes first, unknown sizes next, touch icons last
+    const score = touch ? 1000 : svg ? 0 : size ? Math.abs(size - ICON_SIZE) + (size < ICON_SIZE ? 50 : 0) : 100;
+    found.push({ href, score });
+  });
+  found.sort((a, b) => a.score - b.score);
+  const list = found.map((f) => f.href);
+  try {
+    list.push(new URL("/favicon.ico", pageUrl).href);
+  } catch {}
+  return [...new Set(list)];
+}
+
+// Decode an image (PNG, ICO, SVG, ...) and redraw it as a small PNG data: URL, so what is
+// stored is small and can never be anything but a plain image.
+async function iconToDataUrl(blob) {
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = objectUrl;
+    await img.decode();
+    const w = img.naturalWidth || ICON_SIZE;
+    const h = img.naturalHeight || ICON_SIZE;
+    if (w < 8 || h < 8) throw new Error("Icon too small");
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = ICON_SIZE;
+    const scale = Math.min(ICON_SIZE / w, ICON_SIZE / h);
+    const dw = w * scale;
+    const dh = h * scale;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, (ICON_SIZE - dw) / 2, (ICON_SIZE - dh) / 2, dw, dh);
+    return canvas.toDataURL("image/png");
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function fetchIcon(url) {
+  const resp = await fetch(url, { credentials: "omit", signal: AbortSignal.timeout(10000) });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const type = (resp.headers.get("content-type") || "").toLowerCase();
+  if (type.startsWith("text/html")) throw new Error("Not an image"); // e.g. a soft 404 page
+  const bytes = await readBodyLimited(resp, ICON_MAX_BYTES);
+  // Some servers send icons as application/octet-stream; svg needs its type to decode
+  const blobType = type.startsWith("image/") ? type.split(";")[0] : /\.svg(\?|$)/i.test(url) ? "image/svg+xml" : "";
+  return iconToDataUrl(new Blob([bytes], blobType ? { type: blobType } : {}));
+}
+
+// Look for a feed's icon. Order: the icon the feed itself names (Atom <icon>, which needs
+// no page load), the icons the site's page declares, /favicon.ico, and last the feed's
+// logo (RSS <image> / Atom <logo>, usually wide). Returns { icon } or { error } with
+// what went wrong, which is kept on the feed (iconError) to tell why an icon is missing.
+async function findSiteIcon(feed) {
+  const tried = [];
+  const tryUrls = async (urls) => {
+    for (const url of urls) {
+      if (!url || tried.includes(url) || tried.length >= 6) continue;
+      try {
+        return await fetchIcon(url);
+      } catch (e) {
+        tried.push(url);
+        errors.push(`${url}: ${e.message || e}`);
+      }
+    }
+    return "";
+  };
+  const errors = [];
+  let icon = await tryUrls([feed.feedIconUrl]);
+  if (icon) return { icon };
+
+  const siteUrl = feedSiteUrl(feed);
+  let html = "";
+  let pageUrl = siteUrl;
+  try {
+    const resp = await fetch(siteUrl, { credentials: "omit", signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    pageUrl = resp.url || siteUrl; // where the site redirected to, for relative links
+    html = decodeFeedBytes(await readBodyLimited(resp, ICON_PAGE_MAX_BYTES), resp.headers.get("content-type"));
+  } catch (e) {
+    errors.push(`${siteUrl}: ${e.message || e}`); // /favicon.ico may still be there
+  }
+  icon = await tryUrls([...iconCandidates(html, pageUrl), feed.feedLogoUrl]);
+  return icon ? { icon } : { error: errors.join(" / ") || "No icon found" };
+}
+
+// Fetch the icon of every feed that lacks one (or whose icon is due for a recheck), a few
+// at a time, then save and redraw once.
+async function ensureFeedIcons() {
+  if (iconsRunning) {
+    iconsAgain = true;
+    return;
+  }
+  iconsRunning = true;
+  try {
+    const now = Date.now();
+    const queue = feeds.filter((f) => needsIcon(f, now));
+    if (!queue.length) return;
+    let changed = false;
+    const worker = async () => {
+      while (queue.length) {
+        const feed = queue.shift();
+        const { icon, error } = await findSiteIcon(feed);
+        if (!feeds.includes(feed)) continue; // deleted meanwhile
+        feed.iconCheckedAt = Date.now();
+        if (error) {
+          feed.iconError = error;
+          console.warn(`No icon for ${feed.url}: ${error}`);
+        } else {
+          delete feed.iconError;
+        }
+        // A failed recheck keeps the icon we already have
+        if (icon && icon !== feed.icon) {
+          feed.icon = icon;
+          changed = true;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker));
+    await saveFeeds();
+    if (changed) {
+      renderFeedList();
+      renderArticles();
+    }
+  } catch (e) {
+    console.warn("Failed to fetch site icons", e);
+  } finally {
+    iconsRunning = false;
+    if (iconsAgain) {
+      iconsAgain = false;
+      ensureFeedIcons();
+    }
+  }
 }
 
 // Feed errors are stored as written at the time: English internal messages from the
