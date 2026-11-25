@@ -18,6 +18,17 @@ const translations = {
     showReadArticles: "既読の記事を表示",
     markAllRead: "すべて既読にする",
     markAllReadConfirm: "表示中の未読 ${n} 件をすべて既読にしますか？",
+    shortcuts: "⌨ キーボードショートカット",
+    keyNextPrev: "次 / 前の記事を選択",
+    keyOpen: "選択した記事を開く",
+    keyOpenBackground: "バックグラウンドで開く",
+    keyRead: "既読 / 未読を切り替え",
+    keyBookmark: "ブックマークを切り替え",
+    keySearch: "検索欄へ移動",
+    keyRefresh: "フィードを更新",
+    keyHelp: "このヘルプを表示",
+    keyEscape: "ダイアログを閉じる / 検索欄から抜ける",
+    close: "閉じる",
     feedExists: "このフィードは登録済みです",
     invalidUrl: "URLが正しくありません",
     shareTwitter: "Twitterで共有",
@@ -109,6 +120,17 @@ const translations = {
     showReadArticles: "Show read articles",
     markAllRead: "Mark all as read",
     markAllReadConfirm: "Mark the ${n} unread article(s) in this view as read?",
+    shortcuts: "⌨ Keyboard shortcuts",
+    keyNextPrev: "Select next / previous article",
+    keyOpen: "Open the selected article",
+    keyOpenBackground: "Open in the background",
+    keyRead: "Toggle read / unread",
+    keyBookmark: "Toggle bookmark",
+    keySearch: "Go to the search box",
+    keyRefresh: "Refresh feeds",
+    keyHelp: "Show this help",
+    keyEscape: "Close a dialog / leave the search box",
+    close: "Close",
     feedExists: "This feed is already registered",
     invalidUrl: "Invalid URL",
     shareTwitter: "Share on Twitter",
@@ -234,6 +256,7 @@ const feedUrlInput = document.getElementById("feed-url-input");
 const feedNameInput = document.getElementById("feed-name-input");
 const feedFolderSelect = document.getElementById("feed-folder-select");
 const folderModalOverlay = document.getElementById("folder-modal-overlay");
+const helpModalOverlay = document.getElementById("help-modal-overlay");
 const folderNameInput = document.getElementById("folder-name-input");
 const folderModalError = document.getElementById("folder-modal-error");
 
@@ -437,6 +460,11 @@ function bindEvents() {
     if (e.key === "Enter" && !e.isComposing) addFolder();
   });
 
+  document.addEventListener("keydown", handleShortcut);
+  helpModalOverlay.addEventListener("click", (e) => {
+    if (e.target === helpModalOverlay || e.target.id === "btn-help-close") closeHelp();
+  });
+
   // Close context menu on click elsewhere
   document.addEventListener("click", (e) => {
     if (e.target.closest(".feed-context-menu") || e.target.id === "btn-settings") return;
@@ -575,6 +603,7 @@ function selectAndRender(sel, { fromHistory = false, scrollTop = 0 } = {}) {
   }
   selection = sel;
   tempShowRead = false;
+  cursorLink = null;
   renderFeedList();
   renderArticles();
   setScrollTop(scrollTop);
@@ -908,6 +937,14 @@ function renderArticles() {
   if (!viewChanged) {
     articleListEl.querySelectorAll(":scope > .article-row").forEach((row) => existing.set(row.dataset.link, row));
   }
+  // The selected article may drop out (read articles hidden): move the selection to the
+  // next one that stays, so j / k carry on from the same place
+  if (cursorLink && !surviving.has(cursorLink)) {
+    const old = [...articleListEl.querySelectorAll(":scope > .article-row")].map((r) => r.dataset.link);
+    const i = old.indexOf(cursorLink);
+    cursorLink = (i >= 0 && (old.slice(i + 1).find((l) => surviving.has(l)) || old.slice(0, i).reverse().find((l) => surviving.has(l)))) || null;
+  }
+
   const usedLinks = new Set();
   const rows = [];
   for (const a of articles) {
@@ -933,6 +970,9 @@ function renderArticles() {
       if (row.querySelector(".article-image.pending")) queueImageFetch(row.dataset.link);
     });
   }
+
+  // Keep the keyboard selection on its article across re-renders
+  cursorElement()?.classList.add("cursor");
 
   // Mark as read on scroll (IntersectionObserver)
   setupScrollReadObserver();
@@ -1789,6 +1829,105 @@ function toggleBookmark(link, btnEl) {
   renderFeedList();
 }
 
+// ===== Keyboard shortcuts =====
+// j / k select the next / previous article (outlined and kept in view); the other keys
+// act on the selected article. Keys are ignored while typing in a field, while a dialog
+// is open, and with Ctrl / Cmd / Alt (those belong to the browser).
+let cursorLink = null;
+
+function cursorElement() {
+  if (!cursorLink) return null;
+  return [...articleListEl.querySelectorAll(":scope > .article-row")].find((r) => r.dataset.link === cursorLink) || null;
+}
+
+function setCursor(row) {
+  articleListEl.querySelector(".article-row.cursor")?.classList.remove("cursor");
+  cursorLink = row ? row.dataset.link : null;
+  if (!row) return;
+  row.classList.add("cursor");
+  lastProgrammaticScrollAt = performance.now(); // moving the selection is not reading by scrolling
+  row.scrollIntoView({ block: "nearest" });
+}
+
+function moveCursor(delta) {
+  const rows = [...articleListEl.querySelectorAll(":scope > .article-row")];
+  if (!rows.length) return;
+  const i = rows.indexOf(cursorElement());
+  if (i < 0) {
+    // Nothing selected yet: start from the first article in view
+    const top = articleListEl.getBoundingClientRect().top;
+    setCursor(rows.find((r) => r.getBoundingClientRect().bottom > top) || rows[0]);
+    return;
+  }
+  setCursor(rows[Math.max(0, Math.min(rows.length - 1, i + delta))]);
+}
+
+// Toggle an article between read and unread. The row stays in place even when read
+// articles are hidden, as when it is opened, so the selection doesn't jump.
+function toggleRead(row) {
+  const link = row.dataset.link;
+  if (!link) return;
+  if (readArticles.has(link)) readArticles.delete(link);
+  else readArticles.add(link);
+  row.classList.toggle("read", readArticles.has(link));
+  saveReadArticles();
+  renderFeedList();
+  setupScrollReadObserver(); // an article made unread must be watched again
+}
+
+function openHelp() {
+  const keys = [
+    ["<kbd>j</kbd> / <kbd>k</kbd>", "keyNextPrev"],
+    ["<kbd>o</kbd> / <kbd>Enter</kbd>", "keyOpen"],
+    ["<kbd>Shift</kbd> + <kbd>o</kbd>", "keyOpenBackground"],
+    ["<kbd>m</kbd>", "keyRead"],
+    ["<kbd>s</kbd>", "keyBookmark"],
+    ["<kbd>/</kbd>", "keySearch"],
+    ["<kbd>r</kbd>", "keyRefresh"],
+    ["<kbd>?</kbd>", "keyHelp"],
+    ["<kbd>Esc</kbd>", "keyEscape"],
+  ];
+  document.getElementById("help-modal-title").textContent = t("shortcuts").replace(/^⌨\s*/, "");
+  document.getElementById("help-table").innerHTML = keys
+    .map(([k, label]) => `<tr><td>${k}</td><td>${escapeHtml(t(label))}</td></tr>`)
+    .join("");
+  document.getElementById("btn-help-close").textContent = t("close");
+  helpModalOverlay.classList.remove("hidden");
+}
+
+function closeHelp() {
+  helpModalOverlay.classList.add("hidden");
+}
+
+function handleShortcut(e) {
+  if (e.key === "Escape") {
+    if (!helpModalOverlay.classList.contains("hidden")) closeHelp();
+    else if (!modalOverlay.classList.contains("hidden")) closeModal();
+    else if (!folderModalOverlay.classList.contains("hidden")) closeFolderModal();
+    else if (document.querySelector(".feed-context-menu")) document.querySelectorAll(".feed-context-menu").forEach((m) => m.remove());
+    else if (document.activeElement === searchInput) searchInput.blur();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+  if (e.target.closest?.("input, select, textarea, [contenteditable]")) return;
+  if ([modalOverlay, folderModalOverlay, helpModalOverlay].some((o) => !o.classList.contains("hidden"))) return;
+  const run = (fn) => {
+    e.preventDefault();
+    fn();
+  };
+  const key = e.key;
+  if (key === "j") return run(() => moveCursor(1));
+  if (key === "k") return run(() => moveCursor(-1));
+  if (key === "/") return run(() => searchInput.focus());
+  if (key === "r") return run(() => refreshAll());
+  if (key === "?") return run(openHelp);
+  const row = cursorElement();
+  if (!row) return;
+  if (key === "o" || key === "O" || key === "Enter") return run(() => openOriginal(row, !e.shiftKey));
+  if (key === "m") return run(() => toggleRead(row));
+  if (key === "s") return run(() => toggleBookmark(row.dataset.link, row.querySelector(".bookmark-btn")));
+}
+
 // ===== View Toggle =====
 function setView(card) {
   isCardView = card;
@@ -1952,6 +2091,15 @@ function showSettingsMenu() {
     exportOpml();
   });
   menu.appendChild(exportBtn);
+
+  const helpBtn = document.createElement("div");
+  helpBtn.textContent = t("shortcuts");
+  helpBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    menu.remove();
+    openHelp();
+  });
+  menu.appendChild(helpBtn);
 
   const sep = document.createElement("div");
   sep.className = "context-menu-sep";

@@ -749,7 +749,8 @@ html.dark .show-read-btn:hover {
 
 /* ===== Modal ===== */
 #modal-overlay,
-#folder-modal-overlay {
+#folder-modal-overlay,
+#help-modal-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.4);
@@ -760,12 +761,14 @@ html.dark .show-read-btn:hover {
 }
 
 #modal-overlay.hidden,
-#folder-modal-overlay.hidden {
+#folder-modal-overlay.hidden,
+#help-modal-overlay.hidden {
   display: none;
 }
 
 #modal,
-#folder-modal {
+#folder-modal,
+#help-modal {
   background: #fff;
   border-radius: 8px;
   padding: 24px;
@@ -774,7 +777,8 @@ html.dark .show-read-btn:hover {
 }
 
 #modal h2,
-#folder-modal h2 {
+#folder-modal h2,
+#help-modal h2 {
   font-size: 16px;
   margin-bottom: 16px;
   color: #333;
@@ -1059,13 +1063,15 @@ html.dark .empty-state {
 
 /* Dark modal */
 html.dark #modal,
-html.dark #folder-modal {
+html.dark #folder-modal,
+html.dark #help-modal {
   background: #2a2a2a;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
 html.dark #modal h2,
-html.dark #folder-modal h2 {
+html.dark #folder-modal h2,
+html.dark #help-modal h2 {
   color: #ddd;
 }
 
@@ -1156,4 +1162,63 @@ html.dark .feed-context-menu .context-menu-header:hover {
   #article-list.card-view .article-row {
     width: 100%;
   }
+}
+
+/* ===== Keyboard selection / shortcuts help ===== */
+.article-row.cursor {
+  outline: 2px solid #88b;
+  outline-offset: -2px;
+}
+
+.shortcut-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.shortcut-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid #eee;
+}
+
+.shortcut-table td:first-child {
+  white-space: nowrap;
+  width: 40%;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid #ccc;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #f7f7f7;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: center;
+}
+
+#btn-help-close {
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  color: #555;
+}
+
+html.dark .shortcut-table td {
+  border-bottom-color: #3a3a3a;
+  color: #ccc;
+}
+
+html.dark kbd {
+  background: #333;
+  border-color: #555;
+  color: #ddd;
+}
+
+html.dark #btn-help-close {
+  background: #333;
+  border-color: #555;
+  color: #ccc;
 }

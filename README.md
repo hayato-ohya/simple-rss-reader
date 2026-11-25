@@ -39,10 +39,12 @@
 - ブラウザの戻る・進むで表示の切り替えをたどれる（スクロール位置も復元、再読み込みしても同じ画面）
 - クリックで元の記事を新しいタブで開く（中央クリックならバックグラウンドで開く）
 - SNS共有（X / Facebook）
+- キーボード操作（j/k で選択、o/Enter で開く、Shift+O でバックグラウンド、m で既読/未読、s でブックマーク、/ で検索、r で更新、? でヘルプ）
 
 #### 既読管理
 - スクロールで自動的に既読にする（画面上部から消えた記事が対象）
 - 既読記事の非表示（一時的に表示するボタン付き）
+- 既読を未読に戻す（キーボードの m）
 - 上記2つの設定はデフォルトで有効
 
 #### ブックマーク
@@ -100,10 +102,12 @@ A simple yet feature-rich RSS reader extension for Chromium-based browsers.
 - Browser back / forward move between views (scroll position restored; a reload stays on the same view)
 - Click to open the original article in a new tab (middle-click opens it in the background)
 - Social sharing (X / Facebook)
+- Keyboard shortcuts (j/k select, o/Enter open, Shift+O open in background, m read/unread, s bookmark, / search, r refresh, ? help)
 
 #### Read Status
 - Automatically mark articles as read on scroll (triggered when articles scroll out of the top of the viewport)
 - Hide read articles (with a button to temporarily show them)
+- Mark a read article unread again (m key)
 - Both options are enabled by default
 
 #### Bookmarks
